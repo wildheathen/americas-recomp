@@ -12,6 +12,8 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
 * `make_bvh_fixture.py <dir>` writes a synthetic compressed BLAS, its vertex buffer and the CPU model's rehydrated output (no game data).
   `bvh_test` picks them up with `BVH_REHYDRATE=<dir>`: that path calls `RehydrateRaytracingAccelerationStructureX`, the compute side of the
   builder (`PLATFORM_SURFACE.md` explains the CPU-pointer aliasing the console's unified memory needs).
+* `rehydrate_cpu.cpp <src.bin> <vb.bin> <out.bin> [stride] [count] [format]` drives that same CPU rehydration entry as a standalone tool
+  (same aliasing) and writes the rehydrated BVH. On the fixture from `make_bvh_fixture.py` its output is identical to the CPU model.
 * `xbox_device_proxy.h` now answers `QueryInterface` with the proxy itself when the real object returns its own pointer, so a caller
   that queries for a newer interface keeps going through the overrides. `bvh_test` records the Xbox command-list slot map learned so
   far (Dispatch 14, pipeline state 25, Xbox-only 26-29, PC slot + 4 from 30) in its probe overrides.
