@@ -47,10 +47,12 @@ Steps:
 3. Plumbing check: a multi-geometry BLAS rehydrated with a repeated mesh returns `S_OK` and matches the model (36/199,744 bytes on
    `bvh_08`). [done]
 4. Mesh assignment per geometry index: pair each index with the best mesh by the per-index leaf bounds (the leaf records name the
-   geometry index), then re-run the comparison. `assign_bvh_geometry.py` does it by running the model once per candidate mesh with that
-   mesh on every index and reading the leaves of each index; with the 13 meshes of the window it does not converge (`bvh_08`: 4 of 6
-   indices pick a 2-triangle mesh), so the window's meshes do not cover the cell's geometry indices. The candidate set has to be
-   widened (more windows, or the game's records).
+   geometry index), then re-run the comparison. **Not solvable from the BLAS alone.** `assign_bvh_geometry.py` was extended to run
+   the model once per candidate mesh with that mesh on every index and to invert the leaf transform before comparing bounds; the
+   signal is degenerate, because the leaves of an index are produced from the mesh placed on it, so every candidate matches its own
+   bounds. Triangle counts only narrow the candidates (1-2 triangles per leaf). The per-index mapping needs the game's geometry
+   descriptor array; the BLAS records only the index. Widening the candidate set from 13 to 1,228 meshes changed nothing, which
+   confirms the limit.
 5. Re-verify every BVH of the cell; record counts only (matches, byte differences, enclosure warnings). [one-geometry BLAS verified;
    multi-geometry BLAS verified for plumbing with a repeated mesh]
 
