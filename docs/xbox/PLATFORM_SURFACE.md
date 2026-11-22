@@ -119,8 +119,10 @@ the same). Emulating that with a `VirtualAlloc` mapping at the buffer's GPU virt
 fixture when the source and vertices are separate buffers (sharing one 64 KiB allocation instead returned `E_INVALIDARG`, still open),
 and with the source, vertices, destination and scratch all mapped that way the rehydrate call returns `S_OK` and writes a BVH that
 matches the CPU model **byte for byte** (0 of 1,088 bytes differ). `XS_TRACE=1` shows no device call at all on that path, so this
-export rehydrates on the CPU (or falls back to it); the GPU side is the `RehydrateRaytracingAccelerationStructureBatchedX` variant that
-takes a command list, which is the next thing to drive.
+export rehydrates on the CPU (or falls back to it). The GPU side is `RehydrateRaytracingAccelerationStructureBatchedX` (command list,
+`BVH_REHYDRATE_BATCHED=1`): with a PC `ID3D12GraphicsCommandList8` behind the proxy it faults inside the vendor driver at `+0x1f` of the
+export, reading a truncated pointer, so the command-list call contract (which Xbox slot or argument shape it expects) is the next thing
+to pin down.
 
 **Build path (reached, not finished)**: `BVH_BUILD=1` calls `BuildRaytracingAccelerationStructure` for a three-vertex triangle with
 the Xbox device proxy (slot 76 resource creation, wrapped heaps), and `BVH_TRACE=1` shows the sequence. The builder asks the command

@@ -235,6 +235,7 @@ static const char* MORTON = "?Set64BitMortonCodes@XboxBvhBuilder@@QEAAX_N@Z";
 static const char* BUILD = "?BuildRaytracingAccelerationStructure@XboxBvhBuilder@@QEAAXPEAUID3D12GraphicsCommandList4@@PEBUD3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC@@IPEBUD3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC@@@Z";
 static const char* REHYDRATE = "?RehydrateRaytracingAccelerationStructureX@XboxBvhBuilder@@QEAAJPEAUID3D12Device11@@PEBUD3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC@@@Z";
 static const char* VALIDATE_REHYDRATE = "?ValidateRehydrateAccelerationStructureBuildDesc@XboxBvhBuilder@@QEAAJPEBUD3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC@@@Z";
+static const char* REHYDRATE_BATCHED = "?RehydrateRaytracingAccelerationStructureBatchedX@XboxBvhBuilder@@QEAAJPEAUID3D12GraphicsCommandList8@@IPEBUD3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC@@@Z";
 typedef void* (__fastcall* CtorFn)(void*, ID3D12Device*, bool);
 typedef void(__fastcall* DtorFn)(void*);
 typedef void(__fastcall* PrebuildFn)(void*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS*, const void*, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO*);
@@ -242,6 +243,7 @@ typedef void(__fastcall* MortonFn)(void*, bool);
 typedef void(__fastcall* BuildFn)(void*, ID3D12GraphicsCommandList4*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*, UINT, const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC*);
 typedef long(__fastcall* RehydrateFn)(void*, ID3D12Device11*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*);
 typedef long(__fastcall* ValidateRehydrateFn)(void*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*);
+typedef long(__fastcall* RehydrateBatchedFn)(void*, ID3D12GraphicsCommandList8*, UINT, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*);
 
 // Describe a thrown C++ exception from its EXCEPTION_RECORD (MSVC x64: params = magic, object, ThrowInfo, image base; all links are RVAs)
 static int Describe(EXCEPTION_POINTERS* p) {
@@ -295,6 +297,7 @@ static unsigned long SehDtor(DtorFn f, void* o) { __try { f(o); return 0; } __ex
 static unsigned long SehBuild(BuildFn f, void* o, ID3D12GraphicsCommandList4* cl, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* d) { __try { f(o, cl, d, 0, nullptr); return 0; } __except (Describe(GetExceptionInformation())) { return GetExceptionCode(); } }
 static long SehRehydrate(RehydrateFn f, void* o, ID3D12Device11* d, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* desc) { __try { return f(o, d, desc); } __except (Describe(GetExceptionInformation())) { return -1; } }
 static long SehValidateRehydrate(ValidateRehydrateFn f, void* o, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* desc) { __try { return f(o, desc); } __except (Describe(GetExceptionInformation())) { return -1; } }
+static long SehRehydrateBatched(RehydrateBatchedFn f, void* o, ID3D12GraphicsCommandList8* cl, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* desc) { __try { return f(o, cl, 1, desc); } __except (Describe(GetExceptionInformation())) { return -1; } }
 
 static void DumpMessages(ID3D12Device* dev) {
     ComPtr<ID3D12InfoQueue> q;
@@ -652,6 +655,38 @@ int main(int argc, char** argv) {
                         printf("\n");
                     }
                     rb->Unmap(0, nullptr);
+                }
+            }
+            if (getenv("BVH_REHYDRATE_BATCHED")) {
+                auto batched = (RehydrateBatchedFn)GetProcAddress(m, REHYDRATE_BATCHED);
+                printf("  [rehydrate] batched export %s\n", batched ? "found" : "NOT FOUND");
+                if (batched) {
+                    ComPtr<ID3D12CommandAllocator> ca;
+                    dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&ca));
+                    ComPtr<ID3D12GraphicsCommandList8> bl;
+                    HRESULT chr = dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, ca.Get(), nullptr, IID_PPV_ARGS(&bl));
+                    printf("  [rehydrate] command list 8: 0x%08lx\n", (unsigned long)chr);
+                    if (SUCCEEDED(chr)) {
+                        XboxObjectProxy* blp = XboxObjectProxy::Create((IUnknown*)bl.Get(), "cmdlist8");
+                        if (dstAlias) memset((char*)dstAlias + dstOff, 0, expected.size());
+                        long brh = SehRehydrateBatched(batched, obj, (ID3D12GraphicsCommandList8*)blp, &bd);
+                        printf("  [rehydrate] batched call -> 0x%08lx, device removed 0x%08lx\n", (unsigned long)brh, (unsigned long)dev->GetDeviceRemovedReason());
+                        blp->PrintHits("cmdlist8");
+                        DumpMessages(dev.Get());
+                        HRESULT clh = bl->Close();
+                        printf("  [rehydrate] list close 0x%08lx\n", (unsigned long)clh);
+                        if (SUCCEEDED(clh)) {
+                            ComPtr<ID3D12CommandQueue> q; D3D12_COMMAND_QUEUE_DESC qd = {};
+                            dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&q));
+                            ID3D12CommandList* ls[] = {bl.Get()};
+                            q->ExecuteCommandLists(1, ls);
+                            ComPtr<ID3D12Fence> fe; dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fe));
+                            q->Signal(fe.Get(), 1);
+                            HANDLE ev2 = CreateEvent(0, 0, 0, 0); fe->SetEventOnCompletion(1, ev2); WaitForSingleObject(ev2, 30000);
+                            printf("  [rehydrate] batched executed, device removed 0x%08lx\n", (unsigned long)dev->GetDeviceRemovedReason());
+                            DumpMessages(dev.Get());
+                        }
+                    }
                 }
             }
         }
