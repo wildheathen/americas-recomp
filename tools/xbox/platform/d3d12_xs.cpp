@@ -29,16 +29,21 @@ __declspec(dllexport) HRESULT WINAPI D3D12SerializeVersionedRootSignature(const 
     // not known: this only lets the signature be created. XS_KEEP_XBOX_FLAGS=1 forwards the descriptor unchanged.
     unsigned char copy[48];
     const void* use = desc;
-    unsigned stripped = 0;
+    unsigned stripped = 0, added = 0;
     if (desc && !GetEnvironmentVariableA("XS_KEEP_XBOX_FLAGS", nullptr, 0)) {
         memcpy(copy, desc, sizeof(copy));
         unsigned* fl = (unsigned*)(copy + 40);
         stripped = *fl & 0xff000000u;
         *fl &= 0x00ffffffu;
+        if (GetEnvironmentVariableA("XS_HEAP", nullptr, 0)) {   // let the shaders use ResourceDescriptorHeap (SM 6.6 address lowering)
+            added = 0x10u  /* CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED */ & ~*fl;
+            *fl |= 0x10u  /* CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED */;
+        }
         use = copy;
     }
     HRESULT hr = f ? f(use, blob, error) : E_NOTIMPL;
     if (stripped) Log("  (cleared Xbox-only root signature flag bits 0x%08x)\n", stripped);
+    if (added) Log("  (added heap-indexed flag 0x%08x)\n", added);
     if (FAILED(hr) || GetEnvironmentVariableA("XS_LOG", nullptr, 0)) {
         const unsigned* d = (const unsigned*)desc;
         Log("D3D12SerializeVersionedRootSignature: version %u, hr 0x%08lx\n", d[0], (unsigned long)hr);
@@ -80,6 +85,8 @@ __declspec(dllexport) HRESULT WINAPI D3D12SerializeRootSignature(const void* des
     if (desc && !GetEnvironmentVariableA("XS_KEEP_XBOX_FLAGS", nullptr, 0)) {
         memcpy(copy, desc, sizeof(copy));
         *(unsigned*)(copy + 32) &= 0x00ffffffu;
+        if (GetEnvironmentVariableA("XS_HEAP", nullptr, 0))
+            *(unsigned*)(copy + 32) |= 0x10u  /* CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED */;
         use = copy;
     }
     return f ? f(use, version, blob, error) : E_NOTIMPL;
