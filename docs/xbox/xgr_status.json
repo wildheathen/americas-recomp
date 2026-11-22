@@ -1090,11 +1090,11 @@ true
 ],
 [
 "XPersistentLocalStoragePromptUserForSpaceAsync",
-false
+true
 ],
 [
 "XPersistentLocalStoragePromptUserForSpaceResult",
-false
+true
 ]
 ],
 "IXPersistentLocalStorageImpl3": [

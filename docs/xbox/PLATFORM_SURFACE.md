@@ -94,9 +94,58 @@ the model uses the same formulas as the lowering, so this checks the plumbing. T
 it is what the Hillis-Steele prefix sums in these shaders (masks `0xAAAAAAAA`/`0xCCCCCCCC`/`0xF0F0F0F0` with swizzle offsets 30/60/120) require.
 The other 31 shaders use `global_load/store/atomic` and `s_load` on 64-bit addresses (plus one `TypedLoad`). Those addresses are not derived inside the shader:
 they are 64-bit fields read from buffers (for example `rawBufferLoad.i64` at offset 24 of an input record), so they are GPU virtual addresses that the game obtained from the device.
-Design for them: the proxy records every resource's (virtual address, size, descriptor) when it is created, the lowered shader looks the address up in that table
-(range search in a constant table) and loads through `ResourceDescriptorHeap[i]` (SM 6.6) at `address - base`. It needs the real addresses, so it waits for the game or a captured input;
-raw buffers are limited to 4 GiB per view.
+**Address lowering (implemented)**: the proxy records each resource's (virtual address, size, heap slot) when it is created. The lowered shader finds the
+entry with a branchless binary search over a sorted 16-entry table of (u64 base, u64 size, u32 slot) and accesses through `dx.op.createHandleFromHeap`
+(SM 6.6 `ResourceDescriptorHeap`) at `address - base`; slot 0 holds the table, slot 1 a dummy for addresses no entry covers, 2 and up the resources.
+`xbox_dxil_lower.py` lowers all of it: multi-dword loads and stores become one access per dword (a multi-component raw load through a heap handle crashes
+WARP), `global_atomic_sub` is an add of the negated value, and `global_atomic_fmin/fmax`, which DXIL has no float atomic for, use `UMin`/`UMax` on the
+order-preserving key `bits ^ (bits >> 31 | 0x80000000)` (correct for every non-NaN value; a NaN in memory is replaced instead of ignored). All 52 container
+blobs now lower, assemble and sign; `addr_kernel.ll` + `addrmap_test.cpp` (run by `addr_test.py`) exercise every lowered access against a CPU model on an
+RTX 5080 and on WARP with 0 mismatches. Still needed to dispatch the real shaders: build the table and descriptor heap from the resources the builder
+creates, and create the pipeline with a root signature that carries `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` (the builder's own signatures do not).
+Raw buffers are limited to 4 GiB per view.
+**PSO creation with the lowered blobs (`bvh_test.cpp`)**: the builder creates its 17 root signatures through device slot 16 directly
+from the containers' `RTS0`, so the `d3d12_xs` shim never sees them; with `XS_HEAP=1` `bvh_test` rewrites each one (v1.0 to v1.1, flags
+plus `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`) on the device proxy. With `BVH_ONLY`/`BVH_REPLACE_DIR` and the blobs mapped by pipeline index
+(53 dumps from `BVH_DUMP_DIR`, lowered and re-signed) **53 of 53 pipelines are created with each shader's own signature, 0 compiler
+crashes, 0 other failures** on the RTX 5080. Without the mapping the replaced shaders do not match their signature (31-39 failures), so
+the order matters: `BVH_DUMP_DIR` first, then lower and replace by index.
+**Rehydrate path (`RehydrateRaytracingAccelerationStructureX`)**: this is the compute path (`DecompressHeader`, `Box32`/`Box16Rehydration`,
+`LeafRehydration`), and `tools/xbox/make_bvh_fixture.py` writes a synthetic compressed BLAS for it (8 leaves, one Box32 level and two
+Box16 levels, plain float vertices, no game data) together with the CPU model's rehydrated output. `BVH_REHYDRATE=<dir>` gives the
+three files to `bvh_test`, which calls `ValidateRehydrateAccelerationStructureBuildDesc` and then the export. On the PC the export reads
+`SourceAccelerationStructureData` as a **CPU pointer**, which is what it is on the console (the allocation's CPU and GPU addresses are
+the same). Emulating that with a `VirtualAlloc` mapping at the buffer's GPU virtual address makes the validation return `S_OK` for the
+fixture when the source and vertices are separate buffers (sharing one 64 KiB allocation instead returned `E_INVALIDARG`, still open),
+and with the source, vertices, destination and scratch all mapped that way the rehydrate call returns `S_OK` and writes a BVH that
+matches the CPU model **byte for byte** (0 of 1,088 bytes differ). `XS_TRACE=1` shows no device call at all on that path, so this
+export rehydrates on the CPU (or falls back to it). The GPU side is `RehydrateRaytracingAccelerationStructureBatchedX` (command list,
+`BVH_REHYDRATE_BATCHED=1`): with a PC `ID3D12GraphicsCommandList8` behind the proxy it faults inside the vendor driver at `+0x1f` of the
+export, reading a truncated pointer, so the command-list call contract (which Xbox slot or argument shape it expects) is the next thing
+to pin down. The export loads its context from `this+8` and forwards `(context, command list, descs, count, 0)` to an internal loop;
+`+0x1f` is the return address of that call. The proxy now returns itself from `QueryInterface` (a caller asking for
+`ID3D12Device11`/`ID3D12GraphicsCommandList8` used to get the real object and bypass every override). With that, the Xbox command-list
+vtable is visible: `Dispatch` stays at slot 14, slot 25 is `SetPipelineState` (one pointer), slots 26-29 are four Xbox-only methods,
+and from 30 on each slot is the PC slot + 4 (`30 -> 26` barrier, `32 -> 28` heaps, `33 -> 29` root signature, `35 -> 31` root table,
+`37 -> 33` root constant, `39 -> 35` root 32-bit constants, `45 -> 41` root UAV). Mapping those and leaving 26-29, 80 and 146 as
+logging no-ops lets `RehydrateRaytracingAccelerationStructureBatchedX` return `S_OK` and the list execute with no debug-layer error;
+it writes a 48-byte command stream (type 6, size 0x18, the vertex address and stride 12), issues a single dispatch and **leaves the
+destination untouched**. The stream is therefore what the console hardware consumes (slots 146 and 80 are the parts that submit it);
+emulating that is a separate effort. For rehydration on a PC the CPU variant above is the working route: it matches the CPU model
+byte for byte.
+
+**Build path (reached, not finished)**: `BVH_BUILD=1` calls `BuildRaytracingAccelerationStructure` for a three-vertex triangle with
+the Xbox device proxy (slot 76 resource creation, wrapped heaps), and `BVH_TRACE=1` shows the sequence. The builder asks the command
+list for a command-stream buffer (a command-list extension at slot 148: `(count * 40, 16)` bytes, then it fills 40-byte records), which
+has no PC equivalent; the harness stubs it with a plain allocation. It then calls a method that our PC vtable maps to
+`SetComputeRoot32BitConstant` but with a single 32-bit argument and no root index or offset, so the Xbox vtable numbering differs at
+that slot; the debug layer reports the garbage index and the call faults inside `D3D12SDKLayers`. With
+`CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` the runtime also requires `SetDescriptorHeaps` before `SetComputeRootSignature`. Open: map the
+Xbox command-list extension slots (148 and the root-constant one), bind a heap carrying the table (slot 0) and the resource descriptors,
+and decode the 40-byte records. The stream suggests the build itself is an Xbox hardware command stream (`D3D12XBOX_XDXR_STREAM_DESC`),
+not a set of compute dispatches, which would put the rehydration shaders on the load path instead. Prior art for the address lookup:
+`R0Y00/Xbox2Windows` (`src/title_va_lookup.hlsli`, `era_title_va.cpp`) has the same sorted-range search with alignment and whole-access
+checks, and makes the title's pointers valid GPU addresses with `OpenExistingHeapFromAddress` instead of copying.
 
 **`TypedLoad.i32` and LeafRehydration (blob 48) on NVIDIA**: blob 48 is the only `TypedLoad.i32` user, with two calls
 `TypedLoad.i32(i32 138, handle u0 = compressedBVH (RWByteAddressBuffer), i32 offset, i32 65)`; only component 0 of the `ResRet.i32` is used.
@@ -151,6 +200,14 @@ here. Nothing was dispatched, so whether the upscaler's output is unchanged by t
 The first-chance `0xe06d7363` that `ffx_test` prints during `D3D12CreateDevice` also appears on WARP and is caught inside `D3D12Core`.
 This is the same finding the Xbox2Windows project reports (slot 76, layout `0x101`), reached here by running the code instead of translating it.
 No dispatch was run: it needs real textures, a command list and the package's shaders.
+
+**Shader containers**: the upscaler embeds 29 compute containers whose chunk table is `SFI0/ISG1/OSG1/PSV0/RTS0/HASH/ACCC` and has no
+`DXIL` part, so the code is precompiled RDNA2 and the provider creates the pipeline states from them through a deserialization callback,
+with a separate backend as fallback when a container has no usable `ACCC`. Each payload holds one program (1,184-17,760 bytes, one
+`s_endpgm`-shaped word). Described, not decoded: `R0Y00/Xbox2Windows` (MIT) decodes these streams with LLVM's gfx1030/gfx1013 decoders
+and runs passes 24-26 and RCAS on a PC GPU, and its pinned `XboxBvhBuilder.dll` hash is the one in this package. The title's own shaders
+do not use this container (XBOX_SHADERS.md); plans for it are in FSR4_ACCC_PLAN.md. The loader also references
+`amd_fidelityfx_framegeneration_xbox.dll`, which this package does not ship.
 
 `xbox_device_proxy.h` is the reusable part: an object whose vtable forwards every slot to the PC object by generated thunks (with per-slot hit
 counters, `PrintHits`) and lets selected slots be replaced. It is the starting point for the "D3D12.X runtime" row.

@@ -36,6 +36,11 @@ int main(){
   hr=((HRESULT(*)(void*,size_t,char*,size_t*))pv[4])(po,ps-1,path,&pu); printf("XPersistentLocalStorageGetPath(short buffer) hr=%08lx\n",hr);
   struct Space{ uint64_t avail,totalFree,used,total; } sp={};
   hr=((HRESULT(*)(void*,Space*))pv[5])(po,&sp); printf("XPersistentLocalStorageGetSpaceInfo hr=%08lx avail=%llu totalFree=%llu used=%llu total=%llu\n",hr,sp.avail,sp.totalFree,sp.used,sp.total);
+  { AsyncBlock pb={}; hr=((HRESULT(*)(void*,uint64_t,AsyncBlock*))pv[6])(po,1<<20,&pb); printf("XPersistentLocalStoragePromptUserForSpaceAsync hr=%08lx\n",hr);
+    hr=((HRESULT(*)(void*,AsyncBlock*,BOOLEAN))tv[3])(to,&pb,TRUE); printf("XAsyncGetStatus(wait) hr=%08lx (E_ABORT=%08lx)\n",hr,(unsigned long)E_ABORT);
+    hr=((HRESULT(*)(void*,AsyncBlock*))pv[7])(po,&pb); printf("XPersistentLocalStoragePromptUserForSpaceResult hr=%08lx (E_ABORT=%08lx)\n",hr,(unsigned long)E_ABORT);
+    hr=((HRESULT(*)(void*,uint64_t,AsyncBlock*))pv[6])(po,1<<20,nullptr); printf("XPersistentLocalStoragePromptUserForSpaceAsync(null block) hr=%08lx\n",hr);
+    hr=((HRESULT(*)(void*,AsyncBlock*))pv[7])(po,nullptr); printf("XPersistentLocalStoragePromptUserForSpaceResult(null block) hr=%08lx\n",hr); }
   GUID pkg={0x3720de07,0xe8e4,0x44a3,{0xad,0x32,0xb3,0x59,0xe8,0xad,0xbe,0x55}};
   void* ko=0; q(pkg,pkg,&ko); void** kv=*(void***)ko;
   printf("XPackageIsPackagedProcess=%d\n",(int)((BYTE(*)(void*))kv[4])(ko));

@@ -8,6 +8,7 @@
 
 #include "gtx/log.h"
 #include "xgr_internal.h"
+#include "xtask.h"
 
 namespace gtx::xgr::storage {
 namespace {
@@ -130,10 +131,29 @@ HRESULT XPersistentLocalStorageGetSpaceInfo_impl(void*, SpaceInfo* info) {
   return S_OK;
 }
 
+HRESULT CALLBACK no_prompt_provider(task::AsyncOp op, const task::AsyncProviderData*) {
+  return op == task::AsyncOp::DoWork ? E_ABORT : S_OK;
+}
+
+HRESULT XPersistentLocalStoragePromptUserForSpaceAsync_impl(void*, uint64_t, task::AsyncBlock* async) {
+  if (!async) return E_INVALIDARG;
+  HRESULT hr = task::AsyncBegin(async, nullptr, reinterpret_cast<const void*>(&XPersistentLocalStoragePromptUserForSpaceAsync_impl),
+                                "XPersistentLocalStoragePromptUserForSpaceAsync", no_prompt_provider);
+  if (FAILED(hr)) return hr;
+  return task::AsyncSchedule(async, 0);
+}
+
+HRESULT XPersistentLocalStoragePromptUserForSpaceResult_impl(void*, task::AsyncBlock* async) {
+  if (!async) return E_INVALIDARG;
+  return task::AsyncGetResult(async, reinterpret_cast<const void*>(&XPersistentLocalStoragePromptUserForSpaceAsync_impl), 0, nullptr, nullptr);
+}
+
 const Override kOverrides[] = {
     {"XPersistentLocalStorageGetPathSize", reinterpret_cast<void*>(&XPersistentLocalStorageGetPathSize_impl)},
     {"XPersistentLocalStorageGetPath", reinterpret_cast<void*>(&XPersistentLocalStorageGetPath_impl)},
     {"XPersistentLocalStorageGetSpaceInfo", reinterpret_cast<void*>(&XPersistentLocalStorageGetSpaceInfo_impl)},
+    {"XPersistentLocalStoragePromptUserForSpaceAsync", reinterpret_cast<void*>(&XPersistentLocalStoragePromptUserForSpaceAsync_impl)},
+    {"XPersistentLocalStoragePromptUserForSpaceResult", reinterpret_cast<void*>(&XPersistentLocalStoragePromptUserForSpaceResult_impl)},
 };
 
 }  // namespace
