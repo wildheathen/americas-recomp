@@ -64,8 +64,10 @@ def scan(window, sig, cap, ordered=True):
     """Return (pages, candidates). pages: [(file offset, raw)] of graphics pages in stored order; candidates: dicts."""
     pages, cands, seen = [], [], set()
     for off, raw in streams(window):
+        # every stream can be part of a graphics segment: a segment page need not start with the 42 40 00 00 vertex-block tag
+        # (one tail page starts with an index buffer), so all streams are kept in stored order and the headers decide
+        pages.append((off, raw))
         if raw[:4] == MAGIC:
-            pages.append((off, raw))
             continue
         w = W(raw)
         for i in range(0, len(raw) - 8, 4):
@@ -190,7 +192,7 @@ def main(argv):
     sig = leaf_signature(src)
     print("%s: %d leaves, triangles per geometry index %s" % (os.path.basename(blas_path), bvh.parse_bvh_header(src).num_leaves, sig))
     pages, cands = scan(window, sig, opts["--embeddings"], ordered)
-    print("graphics pages %d, candidate (drawable, model, embedding) %d" % (len(pages), len(cands)))
+    print("streams %d, candidate (drawable, model, embedding) %d" % (len(pages), len(cands)))
     results = []
     for c in cands:
         runs = valid_runs(pages, c["geos"], c["stream"], NEAR_PAGES)

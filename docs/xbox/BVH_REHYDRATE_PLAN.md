@@ -139,6 +139,38 @@ library still returns `S_OK` with 0 differing bytes against the model (18,880 / 
 The validator now treats `+-inf` as a valid conservative bound and fails only on NaN; an infinite outer bound no longer turns the
 enclosure tolerance into NaN.
 
+Milestone 8, done: **every sample whose drawable is in the carved windows is identified and verified.** `rage9_score_blas.py` scores
+each candidate with the checks of milestone 7, and the accepted one is then rehydrated by the library:
+
+| BLAS | leaves | used geometries of the drawable | candidates | checks | library vs model |
+| --- | --- | --- | --- | --- | --- |
+| `bvh_00` | 181 | 0-2 of 3 | 1 | consistent, bounds error 9e-8 | 0 / 18,880 bytes |
+| `bvh_01` | 21,814 | all 13 but index 8 | 1 | consistent, bounds 0, 335/335 overrides | 0 / 2,512,512 bytes |
+| `bvh_02` | 273 | 0-2 of 7 | 1 | consistent, bounds error 1.7e-7 | 0 / 33,280 bytes |
+| `bvh_03` | 1,844 | all 8 but index 6 | 1 | consistent, 69/69 overrides | 0 / 208,448 bytes |
+| `bvh_04` | 2 | 1 geometry | 467 | one consistent (bounds 0); every other rejected | 0 / 384 bytes |
+| `bvh_07` | 566 | 9-11 of 12 | 2 | [9, 10, 11] consistent; [7, 10, 11] rejected (bounds error 0.08) | 0 / 64,704 bytes |
+| `bvh_08` | 1,700 | 0-5 of 10 | 1 | consistent, bounds 0, 23/23 overrides | 0 / 199,744 bytes |
+| `bvh_09` | 103 | 1 geometry | 2 (+10 in the second window) | one consistent (bounds 0); the others miss by 0.44 to 23 | 0 / 11,328 bytes |
+
+`bvh_05` ([152, 84]) and `bvh_06` (29 geometries) have no consistent candidate in either window, even with the geometries taken in
+any order; their drawables are not in the carved windows.
+
+What it took beyond milestone 7:
+
+- *Graphics pages are not all tagged.* A segment is the concatenation of streams in stored order, but a page can start with an index
+  buffer instead of the `42 40 00 00` vertex-block tag. `bvh_01`'s segment is a 1,179,648-byte page followed by an 18,720-byte stream
+  that starts with an index buffer; only that pair validates all 13 vertex headers. The scorer keeps every stream as a possible page
+  and sizes the run from the buffer extent.
+- *The bake rounds overrides differently.* On `bvh_03` the right geometry misses 2 of 69 stored overrides by 1-2 float32 ulp; the
+  library output (0 bytes different) has the same 14 boxes that miss enclosure by about an ulp. The override check allows 4 ulp,
+  `validate_rehydrated_bvh` needs `enclosure_rtol=1e-6` on that sample. A fused multiply-add in the quantized decode was tested and
+  ruled out: it moves `bvh_08` from a zero bounds error to 4.7e-8.
+- *The selection rule is still unknown,* but it is not a prefix rule: `bvh_07` uses the last three geometries, `bvh_01` and `bvh_03`
+  skip one in the middle. It is not visible in the 160-byte geometry record (the words at `+88`, `+92`, `+96` are equal for used and
+  skipped geometries; `+48` looks like a hash), in the index descriptor, in the vertex-format flags, or in the model's `+0x20` u16 array
+  (the identity on all four drawables checked). The next place to look is the per-geometry shader of the drawable's shader group.
+
 ## Open questions
 
 - ~~The geometry index array lives in the drawable, not in the BLAS.~~ Resolved with a nuance: the drawable's primary-LOD geometry list

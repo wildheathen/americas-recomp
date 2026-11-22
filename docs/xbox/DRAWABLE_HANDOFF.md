@@ -32,16 +32,17 @@ clean with zero tolerance):
 | `bvh_02` | 3 of 7 | 33,280 | 0 | unique prefix [116, 336, 90]; instance rotation y<->z, x negated |
 | `bvh_08` | 6 | 199,744 | 0 | unique exact signature [5, 131, 1020, 264, 1168, 654]; identity instance |
 
-Signature matching over the 1 GB window (1,158 drawables, 5,346 geometries, 1,046 distinct counts):
+All samples whose drawable is in the windows are now identified and verified the same way; plan milestone 8 has the table. The
+signature matching below is what led there (1 GB window, 1,158 drawables, 5,346 geometries, 1,046 distinct counts):
 
 | BLAS | signature | result |
 | --- | --- | --- |
 | `bvh_01` | 12 values, 1318...40 | **unique ordered subsequence** of the 13-geometry drawable in stream `0x39c05010`; it skips geometry index 8 (2 triangles) |
 | `bvh_03` | 7 values, 900...118 | **unique ordered subsequence** of the 8-geometry drawable in stream `0x39c8b010`; it skips index 6 (88 triangles) |
-| `bvh_07` | [4, 3, 1120] | subsequence of indices 7, 10, 11 of the 12-geometry drawable in `0x39e77010`; **needs bounds confirmation, could be a coincidence** |
-| `bvh_04` | [2] | 124 candidate drawables (one geometry, 2 triangles) |
-| `bvh_09` | [201] | 2 candidates in this window, 9 in the second |
-| `bvh_05` | [152, 84] | no match, exact or subsequence, in either window |
+| `bvh_07` | [4, 3, 1120] | the 12-geometry drawable in `0x39e77010`, **indices 9, 10, 11** (the checks reject 7, 10, 11) |
+| `bvh_04` | [2] | 467 candidates; exactly one passes the checks |
+| `bvh_09` | [201] | 2 candidates in this window, 9 in the second; exactly one passes |
+| `bvh_05` | [152, 84] | no consistent candidate in either window, in any geometry order |
 | `bvh_06` | 29 values | no match; 16 of its 29 counts appear in no geometry of the window, so its drawable is outside |
 
 Leaf-derived triangle counts are exact: each leaf holds one or two primitive slots, so summing slots per geometry index gives the
@@ -117,34 +118,30 @@ names of the candidates locally. **Do not put those names, buffers or reports in
 
 ### 5.1 The selection rule (highest value)
 
-The leaf `geom_index` is the position in the drawable's geometry list **of the geometries the BVH actually uses**. On the verified
-samples that is a prefix; on `bvh_01` and `bvh_03` the BVH skips exactly one geometry (2 and 88 triangles), so indices above the
-skipped one are shifted down by one. `bvh_07` suggests a 3-of-12 selection. The rule is not visible in the fields decoded so far
-(vertex format, position offset, cluster/triangle counts, descriptor binding, model words).
+The leaf `geom_index` is the position in the drawable's geometry list **of the geometries the BVH actually uses**. The mappings are confirmed by
+geometry (plan milestone 8): `bvh_00`, `bvh_02` and `bvh_08` use a prefix, `bvh_07` the last three of twelve, `bvh_01` and `bvh_03`
+skip one geometry in the middle (index 8, 2 triangles; index 6, 88 triangles). What decides the set is still unknown.
 
-Ideas, in order of cost:
+Ruled out (same values for used and skipped geometries on four drawables): the 160-byte geometry record (`+88`, `+92`, `+96` constant;
+`+48` hash-like), the index descriptor, the vertex-format flags, the model `+0x20` u16 array (the identity everywhere), and the
+presence of the data in the graphics pages (the skipped geometry 8 of `bvh_01` is resident and valid).
 
-1. Rehydrate each candidate mapping and score it with the checks of plan milestone 7 (header bounds, stored box overrides, internal
-   box area). With the decoder fixed these discriminate geometry, so they confirm the subsequence mapping for
-   `bvh_01`/`bvh_03`/`bvh_07` independently of counts; it is the same tool needed for 5.2.
-2. Check whether the skipped geometry is the one whose data is absent from the resolved graphics pages (streamed separately).
-   `rage9_dump_cell.py` validates all headers of the run it picks; dump all geometries and see if the skipped one fails first.
-3. Look at the 160-byte geometry record's remaining words (12-13 look like hashes, 14-15 unknown) and at the u32 `binding` at
-   descriptor `+12`; log them for used vs skipped geometries across several drawables.
-4. Check the model `+0x20` u16 array on a drawable where it is not the identity; it may be the draw order the BVH uses.
-5. Check whether the same drawable appears in two BLAS with different used sets (would rule out a static resource flag).
+Next, in order of cost:
+
+1. The per-geometry shader: the model `+0x20` array is probably the shader index of each geometry; read the drawable's shader group
+   and compare the shaders (name hash, flags, render bucket) of used and skipped geometries. Alpha-blended, decal or "no ray tracing"
+   materials are the obvious suspects.
+2. Check whether the same drawable appears in two BLAS with different used sets (would rule out a static resource flag).
 
 Acceptance: a rule that predicts the used set for the three verified samples and for `bvh_01`/`bvh_03`/`bvh_07`, with the
 rehydration difference still 0 when the predicted mapping is used.
 
-### 5.2 Remaining samples
+### 5.2 Remaining samples (done for the windows we have)
 
-- `bvh_04` (124 candidates) and `bvh_09` (2 + 9 candidates): rehydrate each candidate (with the BLAS's instance transform) and keep
-  the one whose leaves fit the header bounds and the stored overrides with the smallest internal box area.
-- `bvh_05`: no exact or subsequence match in either window; try a small count tolerance (degenerate triangles dropped) and the
-  other carved windows, and the AABB method.
-- `bvh_06`: its drawable is outside both windows (16 of 29 counts do not exist); carve another window or record it as unavailable.
-- `bvh_07`: confirm or drop the subsequence candidate with the AABB check.
+`bvh_01`, `bvh_03`, `bvh_04`, `bvh_07` and `bvh_09` are identified and verified (plan milestone 8). Left:
+
+- `bvh_05` and `bvh_06`: no consistent candidate in either window. The leaves use every primitive index of each geometry, so no
+  triangles were dropped. Their drawables have to come from another carve of `levels.rpf`; run `rage9_score_blas.py` on it.
 
 ### 5.3 Bound-box checks and the validator (done)
 

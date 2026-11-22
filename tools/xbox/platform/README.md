@@ -79,7 +79,7 @@ No game files are part of this repository: the DLLs, the videos and the decoded 
 - `match_bvh_models.py <bvh.bin> <models dir>... [--descriptor <instance208.bin>]` pairs a BVH with exported meshes: it rotates the BVH
   scene bounds by the descriptor's 3x4 transform and compares them with each mesh's world AABB (size and centre, tolerance) and its
   triangle count against `leaves * 2`, the ratio measured in the small pack where the geometry is known.
-- `rage9_score_blas.py <window.rpf> <blas.bin> <instance208.bin> [--runs N] [--embeddings N] [--names] [--write DIR]` scores the drawables
+- `rage9_score_blas.py <window.rpf> <blas.bin> <instance208.bin> [--runs N] [--embeddings N] [--unordered] [--names] [--write DIR]` scores the drawables
   of a levels window against one BLAS. It reads the triangle count per leaf geometry index, keeps every model whose geometry triangle
   counts contain that signature as an ordered subsequence, decodes the used geometries from each candidate page run (adjacent
   graphics pages), applies the instance transform, rehydrates with the CPU model and accepts only candidates whose
