@@ -49,6 +49,7 @@ geometry's triangle count (verified against the drawable list on all matched sam
 
 ## 2. Local data (never commit)
 
+- Everything below lives in a local work folder outside the repository, written `<work>` here.
 - Window: `<work>\tiles\win3_all.rpf` (1 GB carve of `levels.rpf`), second window
   `win40.rpf`, per-window model exports in `models_00`, `models_40`.
 - Samples: `<work>\blas\bvh_00.bin` ... `bvh_09.bin`, plus the extracted `instance208` descriptors and reports.
