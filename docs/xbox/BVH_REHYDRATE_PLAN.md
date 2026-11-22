@@ -91,6 +91,15 @@ library. Two boxes of the builder output are inverted in x; they come out of the
 Leaf coverage per geometry index matches the drawable's triangle counts exactly (5/3, 131/66, 1020/518, 264/139, 1168/617, 654/357),
 which closes the index-to-mesh mapping.
 
+Milestone 5, done: `tools/xbox/rage9_match_drawables.py` matches a BLAS to its drawable without a name. The leaf geometry index plus the
+leaf primitive slots give the exact triangle count per index, and the drawable's geometry list has the same counts in order, so the
+signatures identify the drawable. In the 3 GB window it enumerates 1,158 drawables and matches, with a unique hit, `bvh_00` ->
+drawable A (68/234/48) and `bvh_08` -> drawable B; `bvh_02` ->
+drawable C is a prefix match (the BLAS uses 3 of its 7 geometries). Rehydrating those two new cases gives `S_OK`
+and byte-identical model output again (`bvh_00`: 0/18,880; `bvh_02`: 0/33,280; the latter has three inverted boxes, same as the library).
+`bvh_01` and `bvh_03` have no single-drawable match, neither by name nor by structure (1,162 structural candidates), so their BLAS is
+either an aggregate of several drawables or its drawable is outside the carved window.
+
 ## Open questions
 
 - ~~The geometry index array lives in the drawable, not in the BLAS.~~ Resolved: the drawable's primary-LOD geometry list gives the
