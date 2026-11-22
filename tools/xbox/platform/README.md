@@ -9,6 +9,9 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
 * `xmem.cpp` is a stand-in `xmem.dll` (XMemAlloc, XMemFree, XMemGetWorkingSetStatistics, XMemVirtualQuery); `d3d12_xs.cpp` forwards the two
   `d3d12_xs.dll` functions the DLLs import to the PC `d3d12.dll`. Build each with `cl /LD /O2 file.cpp /Fe:name.dll`. Argument shapes were read from the callers' machine code;
   the meaning of the attribute bits and of two output fields is a guess (see the comments in `xmem.cpp`). `XMEM_LOG=<file>` logs every call.
+* `make_bvh_fixture.py <dir>` writes a synthetic compressed BLAS, its vertex buffer and the CPU model's rehydrated output (no game data).
+  `bvh_test` picks them up with `BVH_REHYDRATE=<dir>`: that path calls `RehydrateRaytracingAccelerationStructureX`, the compute side of the
+  builder (`PLATFORM_SURFACE.md` explains the CPU-pointer aliasing the console's unified memory needs).
 * `bvh_test.cpp` and `ffx_test.cpp` run the package's BVH builder and FidelityFX DLLs on a PC D3D12 device behind `xbox_device_proxy.h` (what works and where it stops: PLATFORM_SURFACE.md). `XS_HEAP=1` adds `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` to the builder's signatures (including the ones it creates from `RTS0` through device slot 16); `BVH_REPLACE_DIR` with the dumps from `BVH_DUMP_DIR` lowered by index creates all 53 pipelines. `BVH_BUILD=1` tries a real build call (reached, then a crash in a builder thread: see PLATFORM_SURFACE.md).
 * `bink_test.cpp` loads `Bink2Scarlett.dll` next to a stand-in `xmem.dll`, decodes every frame of a video and saves two frames as raw BGRA.
   `carve_bink.py <movies.rpf> <out_dir> [count]` extracts Bink videos from the archive (they are stored raw).

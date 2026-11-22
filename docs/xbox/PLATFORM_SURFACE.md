@@ -110,8 +110,18 @@ plus `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`) on the device proxy. With `BVH_ONLY`/`
 (53 dumps from `BVH_DUMP_DIR`, lowered and re-signed) **53 of 53 pipelines are created with each shader's own signature, 0 compiler
 crashes, 0 other failures** on the RTX 5080. Without the mapping the replaced shaders do not match their signature (31-39 failures), so
 the order matters: `BVH_DUMP_DIR` first, then lower and replace by index.
-**A build call is reached but not finished**: `BVH_BUILD=1` calls `BuildRaytracingAccelerationStructure` for a three-vertex triangle with
-the Xbox device proxy (slot 76 resource creation, wrapped heaps) and `BVH_TRACE=1` shows the sequence. The builder asks the command
+**Rehydrate path (`RehydrateRaytracingAccelerationStructureX`)**: this is the compute path (`DecompressHeader`, `Box32`/`Box16Rehydration`,
+`LeafRehydration`), and `tools/xbox/make_bvh_fixture.py` writes a synthetic compressed BLAS for it (8 leaves, one Box32 level and two
+Box16 levels, plain float vertices, no game data) together with the CPU model's rehydrated output. `BVH_REHYDRATE=<dir>` gives the
+three files to `bvh_test`, which calls `ValidateRehydrateAccelerationStructureBuildDesc` and then the export. On the PC the export reads
+`SourceAccelerationStructureData` as a **CPU pointer**, which is what it is on the console (the allocation's CPU and GPU addresses are
+the same). Emulating that with a `VirtualAlloc` mapping at the buffer's GPU virtual address makes the validation return `S_OK` for the
+fixture when the source and vertices are separate buffers (sharing one 64 KiB allocation instead returned `E_INVALIDARG`, still open);
+the rehydrate call still faults, so the source is not the only address it dereferences on the CPU (the vertices, destination or
+an internal stream are candidates). The fixture and the aliasing are the base for continuing.
+
+**Build path (reached, not finished)**: `BVH_BUILD=1` calls `BuildRaytracingAccelerationStructure` for a three-vertex triangle with
+the Xbox device proxy (slot 76 resource creation, wrapped heaps), and `BVH_TRACE=1` shows the sequence. The builder asks the command
 list for a command-stream buffer (a command-list extension at slot 148: `(count * 40, 16)` bytes, then it fills 40-byte records), which
 has no PC equivalent; the harness stubs it with a plain allocation. It then calls a method that our PC vtable maps to
 `SetComputeRoot32BitConstant` but with a single 32-bit argument and no root index or offset, so the Xbox vtable numbering differs at

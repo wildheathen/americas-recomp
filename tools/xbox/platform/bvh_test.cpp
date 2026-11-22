@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <vector>
 #include <csignal>
+#include <fstream>
+#include <iterator>
 using Microsoft::WRL::ComPtr;
 #include "xbox_device_proxy.h"
 #include "xbox_device_overrides.h"
@@ -231,11 +233,15 @@ static const char* DTOR = "??1XboxBvhBuilder@@QEAA@XZ";
 static const char* PREBUILD = "?GetRaytracingAccelerationStructurePrebuildInfo@XboxBvhBuilder@@QEAAXPEBUD3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS@@PEBUD3D12XBOX_XDXR_STREAM_DESC@@PEAUD3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO@@@Z";
 static const char* MORTON = "?Set64BitMortonCodes@XboxBvhBuilder@@QEAAX_N@Z";
 static const char* BUILD = "?BuildRaytracingAccelerationStructure@XboxBvhBuilder@@QEAAXPEAUID3D12GraphicsCommandList4@@PEBUD3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC@@IPEBUD3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC@@@Z";
+static const char* REHYDRATE = "?RehydrateRaytracingAccelerationStructureX@XboxBvhBuilder@@QEAAJPEAUID3D12Device11@@PEBUD3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC@@@Z";
+static const char* VALIDATE_REHYDRATE = "?ValidateRehydrateAccelerationStructureBuildDesc@XboxBvhBuilder@@QEAAJPEBUD3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC@@@Z";
 typedef void* (__fastcall* CtorFn)(void*, ID3D12Device*, bool);
 typedef void(__fastcall* DtorFn)(void*);
 typedef void(__fastcall* PrebuildFn)(void*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS*, const void*, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO*);
 typedef void(__fastcall* MortonFn)(void*, bool);
 typedef void(__fastcall* BuildFn)(void*, ID3D12GraphicsCommandList4*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*, UINT, const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC*);
+typedef long(__fastcall* RehydrateFn)(void*, ID3D12Device11*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*);
+typedef long(__fastcall* ValidateRehydrateFn)(void*, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC*);
 
 // Describe a thrown C++ exception from its EXCEPTION_RECORD (MSVC x64: params = magic, object, ThrowInfo, image base; all links are RVAs)
 static int Describe(EXCEPTION_POINTERS* p) {
@@ -287,6 +293,8 @@ static unsigned long SehCtor(CtorFn f, void* o, ID3D12Device* d) { __try { CallC
 static unsigned long SehPrebuild(PrebuildFn f, void* o, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS* in, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO* out) { __try { f(o, in, nullptr, out); return 0; } __except (Describe(GetExceptionInformation())) { return GetExceptionCode(); } }
 static unsigned long SehDtor(DtorFn f, void* o) { __try { f(o); return 0; } __except (EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode(); } }
 static unsigned long SehBuild(BuildFn f, void* o, ID3D12GraphicsCommandList4* cl, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* d) { __try { f(o, cl, d, 0, nullptr); return 0; } __except (Describe(GetExceptionInformation())) { return GetExceptionCode(); } }
+static long SehRehydrate(RehydrateFn f, void* o, ID3D12Device11* d, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* desc) { __try { return f(o, d, desc); } __except (Describe(GetExceptionInformation())) { return -1; } }
+static long SehValidateRehydrate(ValidateRehydrateFn f, void* o, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* desc) { __try { return f(o, desc); } __except (Describe(GetExceptionInformation())) { return -1; } }
 
 static void DumpMessages(ID3D12Device* dev) {
     ComPtr<ID3D12InfoQueue> q;
@@ -493,6 +501,130 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < 16; i++) printf(" %08x", w32[i]);
                 printf(" (%zu of 64 nonzero)\n", nz);
                 rb->Unmap(0, nullptr);
+            }
+        }
+    }
+
+    if (const char* rdir = getenv("BVH_REHYDRATE")) {
+        // RehydrateRaytracingAccelerationStructureX(device, desc): the compute path where DecompressHeader / Box32 / Box16 / Leaf run.
+        // The fixture comes from tools/xbox/make_bvh_fixture.py (synthetic, no game data) and expected.bin is the CPU model's output.
+        auto rehydrate = (RehydrateFn)GetProcAddress(m, REHYDRATE);
+        auto validate = (ValidateRehydrateFn)GetProcAddress(m, VALIDATE_REHYDRATE);
+        printf("  [rehydrate] %s\n", rehydrate ? "export found" : "EXPORT NOT FOUND");
+        if (rehydrate) {
+            auto read = [&](const char* name) {
+                char p[MAX_PATH] = {}; sprintf_s(p, "%s\\%s", rdir, name);
+                std::ifstream f(p, std::ios::binary);
+                return std::vector<char>((std::istreambuf_iterator<char>(f)), {});
+            };
+            std::vector<char> src = read("src.bin"), vb = read("vb.bin"), expected = read("expected.bin");
+            printf("  [rehydrate] fixture: compressed %zu, vertices %zu, expected %zu\n", src.size(), vb.size(), expected.size());
+            auto mkdef = [&](UINT64 bytes, D3D12_RESOURCE_FLAGS fl) {
+                D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_DEFAULT};
+                D3D12_RESOURCE_DESC rd = {D3D12_RESOURCE_DIMENSION_BUFFER, 0, bytes, 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, fl};
+                ComPtr<ID3D12Resource> r;
+                HRESULT hr = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&r));
+                if (FAILED(hr)) printf("  [rehydrate] buffer %llu failed 0x%08lx\n", (unsigned long long)bytes, (unsigned long)hr);
+                return r;
+            };
+            auto upload = [&](const std::vector<char>& bytes) {
+                D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_UPLOAD};
+                D3D12_RESOURCE_DESC rd = {D3D12_RESOURCE_DIMENSION_BUFFER, 0, bytes.size(), 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE};
+                ComPtr<ID3D12Resource> r;
+                dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&r));
+                void* p = nullptr; if (SUCCEEDED(r->Map(0, nullptr, &p)) && p) { memcpy(p, bytes.data(), bytes.size()); r->Unmap(0, nullptr); }
+                return r;
+            };
+            const UINT64 VB_OFF = 0x8000;
+            ComPtr<ID3D12Resource> dataBuf;
+            void* aliasPtr = nullptr;
+            for (int attempt = 0; attempt < 8 && !aliasPtr; attempt++) {
+                dataBuf = mkdef(0x10000, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                aliasPtr = VirtualAlloc((void*)(uintptr_t)dataBuf->GetGPUVirtualAddress(), 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (!aliasPtr) dataBuf.Reset();
+            }
+            ComPtr<ID3D12Resource> dstBuf = mkdef(expected.size(), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            ComPtr<ID3D12Resource> scratchBuf = mkdef(1 << 20, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            printf("  [rehydrate] src+vb buffer VA %llx, CPU alias %p\n",
+                   dataBuf ? (unsigned long long)dataBuf->GetGPUVirtualAddress() : 0ull, aliasPtr);
+            std::vector<char> blob(0x10000, 0);
+            memcpy(blob.data(), src.data(), src.size());
+            memcpy(blob.data() + VB_OFF, vb.data(), vb.size());
+            if (aliasPtr) memcpy(aliasPtr, blob.data(), blob.size());
+            D3D12_HEAP_PROPERTIES uph = {D3D12_HEAP_TYPE_UPLOAD};
+            D3D12_RESOURCE_DESC urd = {D3D12_RESOURCE_DIMENSION_BUFFER, 0, 0x10000, 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE};
+            ComPtr<ID3D12Resource> blobUp;
+            dev->CreateCommittedResource(&uph, D3D12_HEAP_FLAG_NONE, &urd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&blobUp));
+            { void* p = nullptr; if (SUCCEEDED(blobUp->Map(0, nullptr, &p)) && p) { memcpy(p, blob.data(), blob.size()); blobUp->Unmap(0, nullptr); } }
+            ComPtr<ID3D12CommandAllocator> ua; dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&ua));
+            ComPtr<ID3D12GraphicsCommandList4> ul;
+            dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, ua.Get(), nullptr, IID_PPV_ARGS(&ul));
+            ul->CopyResource(dataBuf.Get(), blobUp.Get());
+            ID3D12Resource* t[2] = {dataBuf.Get(), dstBuf.Get()};
+            for (int i = 0; i < 2; i++) {
+                D3D12_RESOURCE_BARRIER b = {};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.pResource = t[i];
+                b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST; b.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                b.Transition.Subresource = 0xffffffff; ul->ResourceBarrier(1, &b);
+            }
+            ul->Close();
+            ComPtr<ID3D12CommandQueue> uq; D3D12_COMMAND_QUEUE_DESC qd = {};
+            dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&uq));
+            ID3D12CommandList* lists[] = {ul.Get()}; uq->ExecuteCommandLists(1, lists);
+            ComPtr<ID3D12Fence> uf; dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&uf)); uq->Signal(uf.Get(), 1);
+            HANDLE uev = CreateEvent(0, 0, 0, 0); uf->SetEventOnCompletion(1, uev); WaitForSingleObject(uev, 30000);
+            printf("  [rehydrate] data ready, device removed 0x%08lx\n", (unsigned long)dev->GetDeviceRemovedReason());
+
+            D3D12_RAYTRACING_GEOMETRY_DESC g = {};
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            g.Triangles.VertexCount = (UINT)(vb.size() / 12);
+            g.Triangles.VertexBuffer.StartAddress = dataBuf->GetGPUVirtualAddress() + VB_OFF;
+            g.Triangles.VertexBuffer.StrideInBytes = 12;
+            g.Triangles.IndexFormat = DXGI_FORMAT_UNKNOWN;
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd = {};
+            bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+            bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            bd.Inputs.NumDescs = 1;
+            bd.Inputs.pGeometryDescs = &g;
+            bd.SourceAccelerationStructureData = dataBuf->GetGPUVirtualAddress();
+            printf("  [rehydrate] dst VA %llx, scratch VA %llx\n",
+                   (unsigned long long)dstBuf->GetGPUVirtualAddress(), (unsigned long long)scratchBuf->GetGPUVirtualAddress());
+            bd.DestAccelerationStructureData = dstBuf->GetGPUVirtualAddress();
+            bd.ScratchAccelerationStructureData = scratchBuf->GetGPUVirtualAddress();
+            if (validate) printf("  [rehydrate] validate desc -> 0x%08lx\n", (unsigned long)SehValidateRehydrate(validate, obj, &bd));
+            long rh = SehRehydrate(rehydrate, obj, (ID3D12Device11*)proxy, &bd);
+            printf("  [rehydrate] call -> 0x%08lx, device removed 0x%08lx\n", (unsigned long)rh, (unsigned long)dev->GetDeviceRemovedReason());
+            DumpMessages(dev.Get());
+            if (SUCCEEDED(dev->GetDeviceRemovedReason())) {
+                ComPtr<ID3D12Resource> rb = mkdef(expected.size(), D3D12_RESOURCE_FLAG_NONE);
+                D3D12_RESOURCE_BARRIER b = {};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.pResource = dstBuf.Get();
+                b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                b.Transition.Subresource = 0xffffffff;
+                ul->Reset(ua.Get(), nullptr);
+                ul->ResourceBarrier(1, &b);
+                ul->CopyResource(rb.Get(), dstBuf.Get());
+                ul->Close();
+                uq->ExecuteCommandLists(1, lists);
+                uq->Signal(uf.Get(), 2);
+                uf->SetEventOnCompletion(2, uev); WaitForSingleObject(uev, 30000);
+                void* p = nullptr;
+                if (SUCCEEDED(rb->Map(0, nullptr, &p)) && p) {
+                    size_t n = expected.size(), diff = 0, first = (size_t)-1;
+                    for (size_t i = 0; i < n && i < expected.size(); i++)
+                        if (((const unsigned char*)p)[i] != ((const unsigned char*)expected.data())[i]) { if (first == (size_t)-1) first = i; diff++; }
+                    printf("  [rehydrate] %zu of %zu bytes differ from the CPU model%s\n", diff, n, diff ? "" : " (match)");
+                    if (first != (size_t)-1) {
+                        printf("    first at 0x%zx: got", first);
+                        for (size_t i = first; i < first + 16 && i < n; i++) printf(" %02x", ((const unsigned char*)p)[i]);
+                        printf(" expected");
+                        for (size_t i = first; i < first + 16 && i < n; i++) printf(" %02x", ((const unsigned char*)expected.data())[i]);
+                        printf("\n");
+                    }
+                    rb->Unmap(0, nullptr);
+                }
             }
         }
     }
