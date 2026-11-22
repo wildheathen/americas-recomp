@@ -56,6 +56,20 @@ Steps:
 5. Re-verify every BVH of the cell; record counts only (matches, byte differences, enclosure warnings). [one-geometry BLAS verified;
    multi-geometry BLAS verified for plumbing with a repeated mesh]
 
+## Drawable decoder (started)
+
+Milestone 1, block layer: `tools/xbox/rage9_vertex_blocks.py` finds the streams that start with the `42 40 00 00` vertex-block
+header, reads the tagged slot table (low byte tag, offset x2 from the block start, slot 0 at +0x80) and prints a count per tag from
+the adjacent offsets. In a 3 GB window of `levels.rpf` it finds 1,359 blocks and 1,367 tag-`0x42` spans (8 bytes per vertex).
+The span-derived counts do not equal the exporter's vertex counts for the same models (twelve known counts tried), so they are not
+the authoritative counts.
+
+Milestone 2, next: read the counts from the descriptors instead of the spans. Per the public layout, a geometry record points at the
+vertex buffer at `+8` and at the meshlet descriptor at `+64`; each buffer's `+24` pointer addresses the graphics segment, the vertex
+layout carries the count and the meshlet descriptor carries meshlet/triangle/reference counts. Then walk a drawable's primary-LOD
+geometry list to get the index-to-mesh order. The data is split into system and graphics segments (separate streams), so the walk
+needs both.
+
 ## Open questions
 
 - **The geometry index array lives in the drawable, not in the BLAS.** Public measurements of the same title's model resources
