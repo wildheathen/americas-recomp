@@ -64,11 +64,18 @@ the adjacent offsets. In a 3 GB window of `levels.rpf` it finds 1,359 blocks and
 The span-derived counts do not equal the exporter's vertex counts for the same models (twelve known counts tried), so they are not
 the authoritative counts.
 
-Milestone 2, next: read the counts from the descriptors instead of the spans. Per the public layout, a geometry record points at the
-vertex buffer at `+8` and at the meshlet descriptor at `+64`; each buffer's `+24` pointer addresses the graphics segment, the vertex
-layout carries the count and the meshlet descriptor carries meshlet/triangle/reference counts. Then walk a drawable's primary-LOD
-geometry list to get the index-to-mesh order. The data is split into system and graphics segments (separate streams), so the walk
-needs both.
+Milestone 2, done: `tools/xbox/rage9_walk_drawable.py` finds a system page by the drawable name, locates the drawable through the
+pointer to the name at `+168`, and walks LOD (`+80`) -> model list -> geometry list (model `+8`, count at `+16`). Per geometry it
+reads the vertex count from the vertex-format descriptor (`vb+64`, flags at `+0x138`) and the triangle/cluster counts from the index
+descriptor (`geometry+64`) without touching the graphics segment. On drawable B it finds 10 geometries whose
+triangle counts match the BLAS's per-index leaf counts exactly where the BLAS uses them (5/3, 131/66, 1020/518, 264/139, 1168/617,
+654/357 for indices 0-5). **The geometry index in the leaf records is the drawable's geometry order**, which was the missing mapping.
+
+Milestone 3, next: resolve the graphics segment. `tools/xbox/rage9_dump_geometry.py` reads the `0x60000000`-based pointers and dumps
+the raw per-geometry vertex/index slices, but with one 42 40 00 00 stream as the segment only 3 of 10 vertex headers validate, so the
+segment is either a concatenation of graphics pages in stream order or a different stream than the first long one. The vertex data is
+RAGE9 quantized-8 (format 16, position offset 128, the 32-byte bias/axis/scale header just before it) and the index data is the packed
+meshlet form (format 53), so the slices can be passed to `rehydrate_cpu` as-is once the segment is right.
 
 ## Open questions
 
