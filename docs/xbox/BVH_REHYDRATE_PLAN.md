@@ -19,7 +19,7 @@ built from. Everything runs from the local package; no game data, asset names or
 - `obj_to_geometry.py` converts a Wavefront mesh to the raw vertex/index buffers.
 - `match_bvh_models.py` pairs a BVH with meshes by rotating the scene bounds with the `instance208` transform and comparing AABBs and
   triangle counts against `leaves * 2`.
-- Measured on the first nested pack (10 BVHs, interior cell): the geometry is in a 3 GB window of `levels.rpf`; 13 meshes pair with the
+- Measured on the first nested pack (10 BVHs, interior cell): the geometry is in a carved window of `levels.rpf`; 13 meshes pair with the
   10 BVHs, 7 with an exact AABB. The descriptor's 64-bit key is not stored in the model archives searched and is not a simple name hash.
 - Verified case: one single-geometry BLAS (103 leaves) rehydrated with its real mesh returns `S_OK`, every leaf bound is finite and
   ordered, model and library differ in 44 of 11,328 bytes; 21 enclosure warnings come from half-float box16 saturation (transformed
@@ -58,9 +58,11 @@ Steps:
 
 ## Drawable decoder (started)
 
+Open task list, commands and traps: `docs/xbox/DRAWABLE_HANDOFF.md`.
+
 Milestone 1, block layer: `tools/xbox/rage9_vertex_blocks.py` finds the streams that start with the `42 40 00 00` vertex-block
 header, reads the tagged slot table (low byte tag, offset x2 from the block start, slot 0 at +0x80) and prints a count per tag from
-the adjacent offsets. In a 3 GB window of `levels.rpf` it finds 1,359 blocks and 1,367 tag-`0x42` spans (8 bytes per vertex).
+the adjacent offsets. In a 1 GiB carved window of `levels.rpf` it finds 1,359 blocks and 1,367 tag-`0x42` spans (8 bytes per vertex).
 The span-derived counts do not equal the exporter's vertex counts for the same models (twelve known counts tried), so they are not
 the authoritative counts.
 
@@ -93,17 +95,24 @@ which closes the index-to-mesh mapping.
 
 Milestone 5, done: `tools/xbox/rage9_match_drawables.py` matches a BLAS to its drawable without a name. The leaf geometry index plus the
 leaf primitive slots give the exact triangle count per index, and the drawable's geometry list has the same counts in order, so the
-signatures identify the drawable. In the 3 GB window it enumerates 1,158 drawables and matches, with a unique hit, `bvh_00` ->
+signatures identify the drawable. In the 1 GB window it enumerates 1,158 drawables and matches, with a unique hit, `bvh_00` ->
 drawable A (68/234/48) and `bvh_08` -> drawable B; `bvh_02` ->
 drawable C is a prefix match (the BLAS uses 3 of its 7 geometries). Rehydrating those two new cases gives `S_OK`
 and byte-identical model output again (`bvh_00`: 0/18,880; `bvh_02`: 0/33,280; the latter has three inverted boxes, same as the library).
-`bvh_01` and `bvh_03` have no single-drawable match, neither by name nor by structure (1,162 structural candidates), so their BLAS is
-either an aggregate of several drawables or its drawable is outside the carved window.
+
+Milestone 6, partial: the leaf index is the position in the geometry list **of the geometries the BVH uses**, which can be a
+subsequence of the drawable. `bvh_01` matches the 13-geometry drawable in stream `0x39c05010` uniquely after skipping index 8
+(2 triangles), and `bvh_03` matches the 8-geometry drawable in `0x39c8b010` uniquely after skipping index 6 (88 triangles); the skipped
+geometry is shifted out, so every index above it moves down by one. `bvh_07` is a 3-of-12 subsequence candidate that still needs a
+bounds check. `bvh_04` (124 candidates) and `bvh_09` (2 plus 9 in the second window) are ambiguous; `bvh_05` has no match in either
+window; `bvh_06` is outside both (16 of its 29 counts exist in no geometry of the window). The selection rule itself is not yet known
+and is the first open task in `docs/xbox/DRAWABLE_HANDOFF.md`.
 
 ## Open questions
 
-- ~~The geometry index array lives in the drawable, not in the BLAS.~~ Resolved: the drawable's primary-LOD geometry list gives the
-  order, and the leaf geometry index is that list's index (see milestones 2-4). Public measurements of the same title's model resources
+- ~~The geometry index array lives in the drawable, not in the BLAS.~~ Resolved with a nuance: the drawable's primary-LOD geometry list
+  gives the order, and the leaf geometry index is the position of the geometry **among those the BVH uses**, which can be a subsequence
+  of the list (see milestones 2-6). Public measurements of the same title's model resources
   were the fact source: a geometry record points to the vertex buffer at `+8` and to the meshlet descriptor, which selects the index
   buffer, at `+64`; the buffers' own descriptors carry the vertex/reference/triangle counts. The parser is our own; the reference
   implementation is GPL-3 and no code was copied.
