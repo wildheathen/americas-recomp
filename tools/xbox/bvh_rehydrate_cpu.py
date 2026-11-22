@@ -1226,8 +1226,13 @@ class GeometryChecks:
         return self.leaves_outside_header == 0 and self.header_bounds_error <= 1e-4 and self.overrides_inconsistent == 0
 
 
-def stored_geometry_checks(src: bytes, dst: bytes, outside_rtol: float = 1e-3) -> GeometryChecks:
-    """Compare a rehydrated BLAS (`dst`) with the bounds and box overrides stored in its compressed source (`src`)."""
+def stored_geometry_checks(src: bytes, dst: bytes, outside_rtol: float = 1e-3,
+                           override_ulps: float = 4.0) -> GeometryChecks:
+    """Compare a rehydrated BLAS (`dst`) with the bounds and box overrides stored in its compressed source (`src`).
+
+    The overrides were written when the BLAS was baked, and can differ from the rehydrated leaves by a float32 ulp or two even for the
+    right geometry (measured on one sample: 1-2 ulp); `override_ulps` allows that much. A wrong geometry misses by far more.
+    """
     hdr = parse_bvh_header(src)
     tp = decode_leaf_transform(hdr)
     corners = [(x, y, z) for x in (hdr.aabb_min[0], hdr.aabb_max[0]) for y in (hdr.aabb_min[1], hdr.aabb_max[1])
@@ -1253,8 +1258,9 @@ def stored_geometry_checks(src: bytes, dst: bytes, outside_rtol: float = 1e-3) -
     for cid, comp, value in iter_box_overrides(src, hdr):
         b = _child_aabb_from_dst(dst, cid)
         lo, hi = b[comp % 3], b[comp % 3 + 3]
-        tighter = value >= b[comp] if comp < 3 else value <= b[comp]
-        if tighter and lo <= value <= hi:
+        tol = override_ulps * 2.0 ** -23 * max(abs(value), abs(b[comp]), 1e-30) if math.isfinite(value) else 0.0
+        tighter = value >= b[comp] - tol if comp < 3 else value <= b[comp] + tol
+        if tighter and lo - tol <= value <= hi + tol:
             good += 1
         else:
             bad += 1

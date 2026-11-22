@@ -8,11 +8,12 @@ For one BLAS this:
      geometries (separate quantized-8 position stream, meshlet triangles), applies the BLAS's instance transform, rehydrates with the
      CPU model and scores the result with bvh_rehydrate_cpu.stored_geometry_checks: leaves inside the header bounds, leaf union equal
      to the header bounds, stored box overrides consistent, and the internal box area as the tie-break.
+--unordered also tries the geometries in any order, not only as an ordered subsequence.
 A candidate is accepted only if the checks are consistent. Prints counts and stream offsets; drawable names only with --names, and
 they stay local. With --write <dir> the best candidate's float3/uint32 buffers and export.json are written for
 compare_bvh_geometry.py.
 
-usage: python -I rage9_score_blas.py <window.rpf> <blas.bin> <instance208.bin> [--runs N] [--embeddings N] [--names] [--write DIR]
+usage: python -I rage9_score_blas.py <window.rpf> <blas.bin> <instance208.bin> [--runs N] [--embeddings N] [--unordered] [--names] [--write DIR]
 """
 import collections
 import json
@@ -36,8 +37,11 @@ def leaf_signature(src):
     return [per[i] for i in range(max(per) + 1)]
 
 
-def embeddings(sig, counts, cap):
-    """Every way to take `sig` as an ordered subsequence of `counts` (index lists), at most `cap` of them."""
+def embeddings(sig, counts, cap, ordered=True):
+    """Every way to pick distinct geometries of `counts` matching `sig` (index lists), at most `cap` of them.
+
+    ordered: the picked indices must increase (an ordered subsequence); otherwise any order is allowed.
+    """
     out = []
 
     def walk(i, j, acc):
@@ -46,8 +50,8 @@ def embeddings(sig, counts, cap):
         if i == len(sig):
             out.append(list(acc))
             return
-        for k in range(j, len(counts) - (len(sig) - i) + 1):
-            if counts[k] == sig[i]:
+        for k in (range(j, len(counts)) if ordered else range(len(counts))):
+            if counts[k] == sig[i] and k not in acc:
                 acc.append(k)
                 walk(i + 1, k + 1, acc)
                 acc.pop()
@@ -56,7 +60,7 @@ def embeddings(sig, counts, cap):
     return out
 
 
-def scan(window, sig, cap):
+def scan(window, sig, cap, ordered=True):
     """Return (pages, candidates). pages: [(file offset, raw)] of graphics pages in stored order; candidates: dicts."""
     pages, cands, seen = [], [], set()
     for off, raw in streams(window):
@@ -87,7 +91,7 @@ def scan(window, sig, cap):
                 if key in seen:
                     continue
                 seen.add(key)
-                for used in embeddings(sig, counts, cap):
+                for used in embeddings(sig, counts, cap, ordered):
                     cands.append({"stream": off, "name": name, "model": mi, "counts": counts, "used": used,
                                   "geos": [model[k] for k in used]})
     pages.sort(key=lambda x: x[0])
@@ -173,7 +177,8 @@ def score(src, built):
 def main(argv):
     opts = {"--runs": 6, "--embeddings": 64, "--write": None}
     names = "--names" in argv
-    argv = [a for a in argv if a != "--names"]
+    ordered = "--unordered" not in argv
+    argv = [a for a in argv if a not in ("--names", "--unordered")]
     for k in list(opts):
         if k in argv:
             i = argv.index(k)
@@ -184,7 +189,7 @@ def main(argv):
     transform = read_instance_transform(desc_path)
     sig = leaf_signature(src)
     print("%s: %d leaves, triangles per geometry index %s" % (os.path.basename(blas_path), bvh.parse_bvh_header(src).num_leaves, sig))
-    pages, cands = scan(window, sig, opts["--embeddings"])
+    pages, cands = scan(window, sig, opts["--embeddings"], ordered)
     print("graphics pages %d, candidate (drawable, model, embedding) %d" % (len(pages), len(cands)))
     results = []
     for c in cands:

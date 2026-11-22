@@ -628,6 +628,12 @@ class TestStoredGeometryChecks(unittest.TestCase):
         self.assertEqual((chk.overrides_consistent, chk.overrides_inconsistent), (1, 0))
         self.assertTrue(chk.consistent)
 
+    def test_override_one_float_ulp_looser_is_consistent(self):
+        # the bake can round a bound one ulp differently from the rehydration of the same geometry
+        src = self._blas(overrides={6: struct.unpack("<f", struct.pack("<I", 0x3FFFFFFF))[0]})   # one ulp below 2.0
+        chk = bvh.stored_geometry_checks(src, self._rehydrate(src))
+        self.assertEqual((chk.overrides_consistent, chk.overrides_inconsistent), (1, 0))
+
     def test_override_outside_the_leaf_range_is_inconsistent(self):
         src = self._blas(overrides={6: 3.5})
         chk = bvh.stored_geometry_checks(src, self._rehydrate(src))
