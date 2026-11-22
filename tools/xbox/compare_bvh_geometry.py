@@ -44,8 +44,8 @@ def main():
     ap.add_argument("src")
     ap.add_argument("vb", nargs="?")
     ap.add_argument("ib", nargs="?")
-    ap.add_argument("--geom", nargs=6, action="append",
-                    metavar=("VB", "IB", "STRIDE", "COUNT", "VFMT", "IFMT"))
+    ap.add_argument("--geom", nargs="+", action="append",
+                    metavar=("VB IB STRIDE COUNT VFMT IFMT [VOFF]"))
     ap.add_argument("--stride", type=int, default=12)
     ap.add_argument("--vertex-count", type=int, default=0)
     ap.add_argument("--vertex-format", type=int, default=6)
@@ -67,16 +67,19 @@ def main():
     max_geom = max((l.geom_index for l in leaves), default=0)
     geometries = []
     checks = []
-    for vb_path, ib_path, stride, count, vfmt, ifmt in specs:
+    for vb_path, ib_path, stride, count, vfmt, ifmt, *rest in specs:
         vb = open(vb_path, "rb").read()
         ib = b"" if ib_path == "-" else open(ib_path, "rb").read()
         stride = int(stride); vfmt = int(vfmt); ifmt = int(ifmt)
+        voff = int(rest[0]) if rest else 0
         count = int(count) or (len(vb) // stride if stride else 0)
-        ifmt_py = bvh.INDEX_FORMAT_R32_UINT if ifmt == 42 else bvh.INDEX_FORMAT_R16_UINT
+        ifmt_py = (bvh.INDEX_FORMAT_R32_UINT if ifmt == 42 else
+                   bvh.INDEX_FORMAT_RAGE9_MESHLET if ifmt == 53 else bvh.INDEX_FORMAT_R16_UINT)
         geometries.append(bvh.TriangleGeometryDesc(vertex_buffer=vb, vertex_stride=stride, vertex_format=vfmt,
+                                                  vertex_offset=voff,
                                                   index_buffer=(ib or None), index_format=(ifmt_py if ib else bvh.INDEX_FORMAT_NONE)))
         checks.append({"vb": os.path.basename(vb_path), "ib": os.path.basename(ib_path), "stride": stride,
-                       "vertices": count, "vertex_format": vfmt, "index_format": ifmt,
+                       "vertices": count, "vertex_format": vfmt, "index_format": ifmt, "vertex_offset": voff,
                        "triangles_available": len(ib) // ((6 if ifmt == 57 else 12) if ib else 1)})
     max_prim = max((max(l.prim_index_0, l.prim_index_1) for l in leaves
                     if max(l.prim_index_0, l.prim_index_1) != bvh.INVALID_NODE), default=0)
@@ -99,7 +102,7 @@ def main():
     if a.dll:
         out_dir = tempfile.mkdtemp(prefix="bvh_cmp_")
         dll_out = os.path.join(out_dir, "dll.bin")
-        if len(specs) > 1:
+        if len(specs) > 1 or (specs[0][6:] if len(specs[0]) > 6 else []):
             cmd = [a.dll, a.src, dll_out]
             for s in specs:
                 cmd += ["--geom"] + [str(x) for x in s]

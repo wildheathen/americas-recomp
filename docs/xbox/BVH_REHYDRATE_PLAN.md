@@ -54,7 +54,7 @@ Steps:
    descriptor array; the BLAS records only the index. Widening the candidate set from 13 to 1,228 meshes changed nothing, which
    confirms the limit.
 5. Re-verify every BVH of the cell; record counts only (matches, byte differences, enclosure warnings). [one-geometry BLAS verified;
-   multi-geometry BLAS verified for plumbing with a repeated mesh]
+   multi-geometry BLAS verified end to end with the real drawable geometry: 0/199,744 byte difference]
 
 ## Drawable decoder (started)
 
@@ -71,22 +71,38 @@ descriptor (`geometry+64`) without touching the graphics segment. On drawable B 
 triangle counts match the BLAS's per-index leaf counts exactly where the BLAS uses them (5/3, 131/66, 1020/518, 264/139, 1168/617,
 654/357 for indices 0-5). **The geometry index in the leaf records is the drawable's geometry order**, which was the missing mapping.
 
-Milestone 3, next: resolve the graphics segment. `tools/xbox/rage9_dump_geometry.py` reads the `0x60000000`-based pointers and dumps
-the raw per-geometry vertex/index slices, but with one 42 40 00 00 stream as the segment only 3 of 10 vertex headers validate, so the
-segment is either a concatenation of graphics pages in stream order or a different stream than the first long one. The vertex data is
-RAGE9 quantized-8 (format 16, position offset 128, the 32-byte bias/axis/scale header just before it) and the index data is the packed
-meshlet form (format 53), so the slices can be passed to `rehydrate_cpu` as-is once the segment is right.
+Milestone 3, done: the graphics segment is a concatenation of `42 40 00 00` pages in stored order. `tools/xbox/rage9_dump_cell.py`
+finds the shortest page run that validates the vertex-buffer header of every geometry (for this drawable: two pages from `0x39e84d00`,
+113,600 bytes, 10 of 10 headers) and writes each geometry's whole vertex block and packed index buffer. Each vertex block keeps the
+per-geometry **record stride** (20, 24 or 36 bytes here, from `(vb_len - pos_offset) / vertex_count`), with the 8-byte quantized
+position at the vertex-format offset 128 and the 32-byte origin/axis/scale header at 96. Reading only the 8-byte position attribute was
+the earlier mistake that produced garbage coordinates.
+
+Milestone 4, done: `tools/xbox/rage9_export_geometry.py` converts a dumped geometry to what the rehydration library understands, because
+the library only decodes standard DXGI formats (it made no sense of vertex format 16 or index format 53 and ran off the end of the
+vertex buffer). Positions are decoded to float3 with the quantized-8 formula, and the meshlet index buffer is expanded primitive by
+primitive (0..triangles-1) into a uint32 triangle list, so the primitive order matches the BVH leaves. `rehydrate_cpu` gained an
+optional seventh `--geom` value, the vertex byte offset.
+
+End-to-end result on `bvh_08` (6 geometries of drawable B, 1,700 leaves): the library rehydrates with `S_OK` and the
+CPU model output is **byte-identical** (0 of 199,744 bytes differ). The model's box16 sentinel was the last difference: the builder
+writes +-inf (`0x7C00` / `0xFC00`) when a box exceeds half range, not the 65,504 saturation the model used, so the model now follows the
+library. Two boxes of the builder output are inverted in x; they come out of the library itself (same bytes) and are kept as measured.
+Leaf coverage per geometry index matches the drawable's triangle counts exactly (5/3, 131/66, 1020/518, 264/139, 1168/617, 654/357),
+which closes the index-to-mesh mapping.
 
 ## Open questions
 
-- **The geometry index array lives in the drawable, not in the BLAS.** Public measurements of the same title's model resources
-  describe a drawable with a primary-LOD geometry list (one entry per geometry index, tens to hundreds of entries): a geometry record
-  points to the vertex buffer at `+8` and to the meshlet descriptor, which selects the index buffer, at `+64`; the buffers' own
-  descriptors carry the vertex/reference/triangle counts. Recovering the index-to-mesh mapping therefore means decoding the drawable
-  resource of the cell, which needs that resource's page/pointer layout in `levels.rpf` (the archive is paged and relocated). The
-  documented facts are reusable; the reference implementation is GPL-3, so our parser has to be written from the facts.
-- Whether the 21 box16 enclosure warnings are expected on the console as well (half saturation), or whether the leaf transform for
-  this cell should be decoded differently.
+- ~~The geometry index array lives in the drawable, not in the BLAS.~~ Resolved: the drawable's primary-LOD geometry list gives the
+  order, and the leaf geometry index is that list's index (see milestones 2-4). Public measurements of the same title's model resources
+  were the fact source: a geometry record points to the vertex buffer at `+8` and to the meshlet descriptor, which selects the index
+  buffer, at `+64`; the buffers' own descriptors carry the vertex/reference/triangle counts. The parser is our own; the reference
+  implementation is GPL-3 and no code was copied.
+- Whether the two inverted boxes the builder emits for this cell matter on the console, or whether they sit on degenerate triangles
+  where an empty box is harmless. The model and the library agree byte for byte, so it is not a decoder difference.
+- The drawable decoder finds a drawable by name inside the inflated streams; for a resource whose name is not known, the dictionary
+  entry (name + hash) still has to be located, and the graphics page run is searched in stored order, which worked here but needs a
+  check on a drawable whose pages are not adjacent.
 - Whether upstream wants this tool set at all: their merged work (#34, #112, #119) covers the CPU model and the address lowering, not
   the library-driven rehydrate or the pairing. A claim in the coordination issue and a pull request would be the next step after the
   tests above.

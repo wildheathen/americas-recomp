@@ -4,7 +4,7 @@
 // is a CPU pointer for the builder and a GPU address for its resources.
 // build: cl /nologo /EHsc /O2 /std:c++17 rehydrate_cpu.cpp d3d12.lib dxgi.lib /Fe:rehydrate_cpu.exe
 // usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6] [index.bin] [indexFormat=42]
-//        rehydrate_cpu <src.bin> <out.bin> --geom <vb.bin> <index.bin|-> <stride> <vertexCount> <vertexFormat> <indexFormat> [--geom ...]
+//        rehydrate_cpu <src.bin> <out.bin> --geom <vb.bin> <index.bin|-> <stride> <vertexCount> <vertexFormat> <indexFormat> [vertexByteOffset] [--geom ...]
 //   src.bin starts with the 64-byte Xbox BVH header; the --geom form passes one D3D12_RAYTRACING_GEOMETRY_DESC per geometry, in index
 //   order. XboxBvhBuilder.dll must be loadable.
 #include <windows.h>
@@ -77,7 +77,7 @@ static Aliased MakeAliased(ID3D12Device* dev, UINT64 bytes, bool zero) {
 struct Geometry {
     std::vector<char> vb, ib;
     UINT stride = 12, count = 0, vfmt = 6, ifmt = 42;
-    UINT64 vbOff = 0, ibOff = 0;
+    UINT64 vbOff = 0, ibOff = 0, voff = 0;   // voff: where the positions start inside the given vertex buffer
 };
 
 int main(int argc, char** argv) {
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         outPath = argv[2];
         for (int i = 3; i < argc;) {
             if (strcmp(argv[i], "--geom") || i + 6 >= argc) {
-                printf("--geom needs <vb> <index|-> <stride> <count> <vertexFormat> <indexFormat>\n");
+                printf("--geom needs <vb> <index|-> <stride> <count> <vertexFormat> <indexFormat> [vertexByteOffset]\n");
                 return 2;
             }
             Geometry g;
@@ -101,14 +101,19 @@ int main(int argc, char** argv) {
             g.count = (UINT)atoi(argv[i + 4]);
             g.vfmt = (UINT)atoi(argv[i + 5]);
             g.ifmt = (UINT)atoi(argv[i + 6]);
+            int used = 7;
+            if (i + 7 < argc && argv[i + 7][0] >= '0' && argv[i + 7][0] <= '9') {   // optional 7th value: positions start here
+                g.voff = (UINT64)atoi(argv[i + 7]);
+                used = 8;
+            }
             geoms.push_back(std::move(g));
-            i += 7;
+            i += used;
         }
         if (geoms.empty()) { printf("no --geom given\n"); return 2; }
     } else {
         if (argc < 4) {
             printf("usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6] [index.bin] [indexFormat=42]\n");
-            printf("       rehydrate_cpu <src.bin> <out.bin> --geom <vb> <index|-> <stride> <count> <vertexFormat> <indexFormat> [--geom ...]\n");
+            printf("       rehydrate_cpu <src.bin> <out.bin> --geom <vb> <index|-> <stride> <count> <vertexFormat> <indexFormat> [vertexByteOffset] [--geom ...]\n");
             return 2;
         }
         srcPath = argv[1];
@@ -183,7 +188,7 @@ int main(int argc, char** argv) {
         g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
         g.Triangles.VertexFormat = (DXGI_FORMAT)s.vfmt;
         g.Triangles.VertexCount = s.count;
-        g.Triangles.VertexBuffer.StartAddress = data.res->GetGPUVirtualAddress() + s.vbOff;
+        g.Triangles.VertexBuffer.StartAddress = data.res->GetGPUVirtualAddress() + s.vbOff + s.voff;
         g.Triangles.VertexBuffer.StrideInBytes = s.stride;
         g.Triangles.IndexFormat = s.ib.empty() ? DXGI_FORMAT_UNKNOWN : (DXGI_FORMAT)s.ifmt;
         if (!s.ib.empty()) {
