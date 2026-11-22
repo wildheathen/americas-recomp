@@ -63,5 +63,6 @@ From `XboxBvhBuilder.dll` (`RehydrateRaytracingAccelerationStructureX` / `Rehydr
   of `levels.rpf` (found with a name filter; the archive has no readable name table): 13 meshes pair with the 10 BVHs, 7 of them with an
   exact AABB and a triangle ratio of 0.85-1.01. One of those, a single-geometry BLAS with 103 leaves, was rehydrated with its real mesh:
   the library returns `S_OK`, every leaf bound is finite and ordered, the model and the library differ in 44 of 11,328 bytes, and 21 box
-  enclosure warnings remain because the transformed y extent (+/-72,536) exceeds the half-float box16 range (+/-65,504). Other BVHs in
-  the cell reference more than one geometry index, which `rehydrate_cpu` does not yet accept.
+  enclosure warnings remain because the transformed y extent (+/-72,536) exceeds the half-float box16 range (+/-65,504). Both tools
+  accept an arbitrary number of geometry descriptors (repeatable `--geom`): a six-geometry BLAS rehydrated with one repeated mesh returns
+  `S_OK` and differs from the model in 36 of 199,744 bytes; assigning a mesh to each geometry index is still open.

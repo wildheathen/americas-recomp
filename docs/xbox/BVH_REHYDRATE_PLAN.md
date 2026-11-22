@@ -31,23 +31,25 @@ built from. Everything runs from the local package; no game data, asset names or
 geometry. `rehydrate_cpu` and `compare_bvh_geometry.py` now take a list of geometries (vertex buffer, optional index buffer, stride,
 count, formats), so a BLAS can be rehydrated with the geometry descriptors the game would pass.
 
-Result: **the library's CPU entry rejects more than one geometry**. With two identical descriptors it faults inside itself
-(`XboxBvhBuilder+0x1606e`) regardless of the descriptor stride used when packing them (48, 56, 64, 72, 80, 96 bytes), and returns
-through the SEH wrapper. A single geometry works. So the multi-geometry BLAS of the cell cannot be rehydrated through this export on a
-PC as it is; the one-geometry BLAS is verified end to end. The repeated-option support stays in both tools for the day the array layout
-is known, and `REHYDRATE_GEOM_STRIDE` is the probe for it.
+Result: **multi-geometry works; the earlier crash was our own undersized array.** `bvh_08` has leaves up to `geom_index 5` and was
+first called with only two descriptors, so the library indexed past the array and faulted at `XboxBvhBuilder+0x1606e`. With six
+descriptors it returns `S_OK`; a one-geometry BLAS called with two descriptors returns the same bytes as with one. The plumbing check on
+`bvh_08` with the same mesh repeated for all six indices: model and library differ in 36 of 199,744 bytes, every leaf bound is finite and
+ordered, and the model reports two inverted AABBs. What is still open is the **mesh per geometry index**: the triangle-count signal
+(leaves of that index against the mesh's triangles) is noisy (ratios 0.5-1.9), so it cannot assign the 13 meshes to the up-to-29 indices
+of a BLAS; the game's geometry records would be needed.
 
 Steps:
 
 1. New `--geom <vb> <ib> <stride> <count> <vertexFormat> <indexFormat>` option, repeatable, after `<src> <out>`; the old positional
    form stays as a single-geometry shortcut. [done]
 2. The comparison harness accepts the same repeated option, builds the geometry list and runs the model and the library. [done]
-3. Plumbing check: a multi-geometry BLAS rehydrated with a repeated mesh must return `S_OK` and match the model; this checks the
-   descriptor array, not the mesh assignment. [blocked: the library faults with two descriptors]
+3. Plumbing check: a multi-geometry BLAS rehydrated with a repeated mesh returns `S_OK` and matches the model (36/199,744 bytes on
+   `bvh_08`). [done]
 4. Mesh assignment per geometry index: pair each index with the best mesh by the per-index leaf bounds (the leaf records name the
-   geometry index), then re-run the comparison. [blocked by 3]
-5. Re-verify every BVH of the cell; record counts only (matches, byte differences, enclosure warnings). [only the single-geometry
-   BLAS can be verified]
+   geometry index), then re-run the comparison. [open: triangle counts are not a reliable signal; needs the game's records]
+5. Re-verify every BVH of the cell; record counts only (matches, byte differences, enclosure warnings). [one-geometry BLAS verified;
+   multi-geometry BLAS verified for plumbing with a repeated mesh]
 
 ## Open questions
 
