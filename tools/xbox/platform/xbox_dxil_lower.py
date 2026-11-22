@@ -25,6 +25,17 @@ Lowered so far (more are added as shaders need them):
   Min3/Max3_F32, Min3/Max3/Med3_U32, BFI, V_ALIGNBYTE_B32, WaveMin_U32, MakeUniform.i64   the obvious standard operations
   TypedLoad.i32            (handle, byte offset, format 65 = 8_UINT): the dword at (offset & ~3) of the raw buffer, byte (offset & 3);
                            only component 0 of the result may be used
+  llvm.copysign.f32        magnitude of the first operand with the sign of the second (bit operations)
+  { i32, i32, i32[, i32] } first-class aggregates are flattened like the pairs above; rawBufferLoad/Store calls that carry a second
+                           coordinate (an Xbox DXC habit) get it added to the byte index
+  global_load_dword{,x2,x3,x4}_with_cache, global_store_dword{,x3,x4}_with_cache, s_load_dword_with_cache,
+  global_atomic_{add,sub,fmin,fmax}: the 64-bit address is looked up in a table of (base, size, heap slot) entries and the access goes through
+                           dx.op.createHandleFromHeap (SM 6.6 ResourceDescriptorHeap). Heap slot 0 holds the table itself (raw UAV), slot 1
+                           is a dummy for addresses that no entry covers, slots 2 and up are the resources. The table is sorted by base and
+                           padded to 16 entries with (base = 2^64-1, size = 0); the lookup is a branchless binary search. Offsets past the
+                           start of the covered range are passed as a byte offset into the resource's descriptor, so the view is limited to
+                           4 GiB. Multi-dword accesses become one access per dword (a multi-component raw load through a heap handle crashes WARP).
+                           fmin/fmax use UMin/UMax on the order-preserving float key (correct except for NaN stored in memory, which is replaced).
 The wave intrinsics assume the 64-lane waves the shaders were built for: run the result with the wave size pinned to 64 (dxil_sm66_wave.py).
 """
 import re, sys
@@ -154,6 +165,11 @@ DECLS = {
     "@dx.op.waveActiveOp.i32(": "declare i32 @dx.op.waveActiveOp.i32(i32, i32, i8, i8) #1",
     "@dx.op.waveReadLaneFirst.i64(": "declare i64 @dx.op.waveReadLaneFirst.i64(i32, i64) #1",
     "@dx.op.rawBufferLoad.i32(": "declare %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32, %dx.types.Handle, i32, i32, i8, i32) #1",
+    "@dx.op.rawBufferLoad.i64(": "declare %dx.types.ResRet.i64 @dx.op.rawBufferLoad.i64(i32, %dx.types.Handle, i32, i32, i8, i32) #1",
+    "@dx.op.rawBufferStore.i32(": "declare void @dx.op.rawBufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32, i32, i8, i32) #1",
+    "@dx.op.atomicBinOp.i32(": "declare i32 @dx.op.atomicBinOp.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32) #1",
+    "@dx.op.createHandleFromHeap(": "declare %dx.types.Handle @dx.op.createHandleFromHeap(i32, i32, i1, i1) #0",
+    "@dx.op.annotateHandle(": "declare %dx.types.Handle @dx.op.annotateHandle(i32, %dx.types.Handle, %dx.types.ResourceProperties) #0",
 }
 
 
@@ -171,6 +187,8 @@ def lower(text):
     pairs = {}            # SSA name of a pair value -> (scalar0, scalar1)
     alias = {}            # SSA name of a scalar produced by extractvalue -> the scalar that replaces it
     bytes_ = {}
+    agg_comps = {}        # SSA name of a multi-dword load -> [component SSA value]
+    aggs = {}             # SSA name of a {i32,i32,i32[,i32]} value -> [element SSA/literal]
     out = []
     counter = [0]
     used = set()
@@ -185,9 +203,14 @@ def lower(text):
         return re.sub(r"%[\w.]+", lambda m: alias.get(m.group(0), m.group(0)), line)
 
     ins_re = re.compile(r"^\s*(%[\w.]+) = insertvalue " + PAIR_RE + r" (undef|%[\w.]+), (?:half|i32) (%[\w.]+|[-+\w.]+), ([01])\s*$")
+    ins_any_re = re.compile(r"^\s*(%[\w.]+) = insertvalue \{ i32, i32, i32(?:, i32)? \} (undef|%[\w.]+|\{[^}]*\}), i32 (%[\w.]+|[-+]?\d+), ([0-3])\s*$")
     ext_re = re.compile(r"^\s*(%[\w.]+) = extractvalue " + PAIR_RE + r" (%[\w.]+), ([01])\s*$")
+    ext_any_re = re.compile(r"^(\s*)(%[\w.]+) = extractvalue \{ i32(?:, i32)+ \} (%[\w.]+), (\d+)\s*$")
     resret_re = re.compile(r"^(\s*)(%[\w.]+) = extractvalue %dx\.types\.ResRet\.i32 (%[\w.]+), (\d+)\s*$")
-    call_re = re.compile(r"^(\s*)(%[\w.]+) = call ([^@]+?) @xbox\.([\w.]+)\(i32 \d+(?:, (.*?))?\)\s*(?:,\s*![^;]*)?(?:;.*)?$")
+    copysign_re = re.compile(r"^(\s*)(%[\w.]+) = call float @llvm\.copysign\.f32\(float (%[\w.]+|[-+]?[\d.eE+]+), float (%[\w.]+|[-+]?[\d.eE+]+)\)\s*$")
+    raw2_coord_re = re.compile(r"^(\s*)(.*?@dx\.op\.rawBuffer(?:Load|Store)\.[A-Za-z0-9.]+\(i32 (?:139|140), %dx\.types\.Handle %[\w.]+, i32 )([^,]+)(, i32 )(?!undef\b)([^,]+)(, .*)$")
+    ext_lit_re = re.compile(r"^(\s*)(%[\w.]+) = extractvalue \{ i32(?:, i32)+ \} \{([^}]*)\}, (\d+)\s*$")
+    call_re = re.compile(r"^(\s*)(?:%([\w.]+) = )?call ([^@]+?) @xbox\.([\w.]+)\(i32 \d+(?:, (.*?))?\)\s*(?:,\s*![^;]*)?(?:;.*)?$")
 
     def operand(a):
         """('%x' | literal pair) -> (s0, s1);  'i32 %x' -> '%x'"""
@@ -202,6 +225,23 @@ def lower(text):
 
     for line in text.split("\n"):
         line = sub(line)
+        m = raw2_coord_re.match(line)
+        if m:
+            t = fresh()
+            out.append("%s%s = add i32 %s, %s" % (m.group(1), t, m.group(3), m.group(5)))
+            line = m.group(1) + m.group(2) + t + ", i32 undef" + m.group(6)
+        m = copysign_re.match(line)
+        if m:
+            x, y, xs, ys, rr = fresh(), fresh(), fresh(), fresh(), fresh()
+            emit = lambda s: out.append(m.group(1) + s)
+            emit("%s = bitcast float %s to i32" % (x, m.group(3)))
+            emit("%s = bitcast float %s to i32" % (y, m.group(4)))
+            emit("%s = and i32 %s, 2147483647" % (xs, x))
+            emit("%s = and i32 %s, -2147483648" % (ys, y))
+            emit("%s = or i32 %s, %s" % (rr, xs, ys))
+            emit("%s = bitcast i32 %s to float" % (m.group(2), rr))
+            n_lowered += 1
+            continue
         m = ins_re.match(line)
         if m:
             dst, src, val, idx = m.groups()
@@ -209,9 +249,35 @@ def lower(text):
             cur[int(idx)] = val
             pairs[dst] = tuple(cur)
             continue
+        m = ins_any_re.match(line)
+        if m:
+            dst, src, val, idx = m.groups()
+            cur = aggs.get(src)
+            if cur is None:
+                lit = re.findall(r"i32 ([^,}\s]+)", src) if src.startswith("{") else []
+                cur = (lit or ["undef"] * 4) + ["undef"] * (4 - len(lit or []))
+            cur = list(cur)
+            cur[int(idx)] = val
+            aggs[dst] = cur
+            continue
         m = ext_re.match(line)
+        if m and m.group(2) in agg_comps:
+            alias[m.group(1)] = agg_comps[m.group(2)][int(m.group(3))]
+            continue
         if m and m.group(2) in pairs:
             alias[m.group(1)] = pairs[m.group(2)][int(m.group(3))]
+            continue
+        m = ext_lit_re.match(line)
+        if m:
+            lit = re.findall(r"i32 ([^,}\s]+)", m.group(3))[int(m.group(4))]
+            alias[m.group(2)] = lit
+            continue
+        m = ext_any_re.match(line)
+        if m and m.group(3) in aggs:
+            alias[m.group(2)] = aggs[m.group(3)][int(m.group(4))]
+            continue
+        if m and m.group(3) in agg_comps:
+            alias[m.group(2)] = agg_comps[m.group(3)][int(m.group(4))]
             continue
         m = resret_re.match(line)
         if m and m.group(3) in bytes_:
@@ -224,6 +290,7 @@ def lower(text):
             out.append(line)
             continue
         ind, dst, rty, name, argtext = m.groups()
+        dst = "%" + dst if dst else None
         args = split_args(argtext or "")
         emit = lambda s: out.append(ind + s)
 
@@ -249,6 +316,96 @@ def lower(text):
             r = fresh()
             emit("%s = %s i32 %s, %s" % (r, op, a, b))
             return r
+
+        TABLE_SLOT, MISS_SLOT = 0, 1
+
+        def addr_lookup(a):
+            """64-bit address -> (handle to the owning resource, byte offset). Addresses outside every entry read/write the
+            dummy resource in heap slot 1; the caller zeroes the result if it cares. Table entries are 24 bytes: u64 base,
+            u64 size, u32 heap slot (the last dword is padding). Sorted by base, 16 entries, sentinel base 2^64-1 size 0."""
+            th = fresh()
+            emit("%s = call %%dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %d, i1 false, i1 true)" % (th, TABLE_SLOT))
+            used.update(("@dx.op.createHandleFromHeap(", "@dx.op.annotateHandle(", "@dx.op.rawBufferLoad.i64(", "@dx.op.rawBufferLoad.i32("))
+            tbl = fresh()
+            emit("%s = call %%dx.types.Handle @dx.op.annotateHandle(i32 216, %%dx.types.Handle %s, %%dx.types.ResourceProperties { i32 4107, i32 0 })" % (tbl, th))
+            idx = fresh()
+            emit("%s = add i32 0, 0" % idx)
+            for step in (8, 4, 2, 1):
+                j = i("add", idx, str(step))
+                jb = i("mul", j, "24")
+                rb = fresh()
+                emit("%s = call %%dx.types.ResRet.i64 @dx.op.rawBufferLoad.i64(i32 139, %%dx.types.Handle %s, i32 %s, i32 undef, i8 3, i32 8)" % (rb, tbl, jb))
+                b = fresh()
+                emit("%s = extractvalue %%dx.types.ResRet.i64 %s, 0" % (b, rb))
+                c = fresh()
+                emit("%s = icmp uge i64 %s, %s" % (c, a, b))
+                nit = fresh()
+                emit("%s = select i1 %s, i32 %s, i32 %s" % (nit, c, j, idx))
+                idx = nit
+            fb = i("mul", idx, "24")
+            rb = fresh()
+            emit("%s = call %%dx.types.ResRet.i64 @dx.op.rawBufferLoad.i64(i32 139, %%dx.types.Handle %s, i32 %s, i32 undef, i8 3, i32 8)" % (rb, tbl, fb))
+            base, size = fresh(), fresh()
+            emit("%s = extractvalue %%dx.types.ResRet.i64 %s, 0" % (base, rb))
+            emit("%s = extractvalue %%dx.types.ResRet.i64 %s, 1" % (size, rb))
+            d = fresh()
+            emit("%s = sub i64 %s, %s" % (d, a, base))
+            valid = fresh()
+            emit("%s = icmp ult i64 %s, %s" % (valid, d, size))
+            hb = i("add", fb, "16")
+            rh = fresh()
+            emit("%s = call %%dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %%dx.types.Handle %s, i32 %s, i32 undef, i8 1, i32 4)" % (rh, tbl, hb))
+            hp = fresh()
+            emit("%s = extractvalue %%dx.types.ResRet.i32 %s, 0" % (hp, rh))
+            slot = fresh()
+            emit("%s = select i1 %s, i32 %s, i32 %d" % (slot, valid, hp, MISS_SLOT))
+            d32 = fresh()
+            emit("%s = trunc i64 %s to i32" % (d32, d))
+            off = fresh()
+            emit("%s = select i1 %s, i32 %s, i32 0" % (off, valid, d32))
+            hw = fresh()
+            emit("%s = call %%dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %s, i1 false, i1 true)" % (hw, slot))
+            h = fresh()
+            emit("%s = call %%dx.types.Handle @dx.op.annotateHandle(i32 216, %%dx.types.Handle %s, %%dx.types.ResourceProperties { i32 4107, i32 0 })" % (h, hw))
+            return h, off, valid
+
+        def raw_load(a, count):
+            """count dwords at the 64-bit address -> list of component SSA values (0 where the address is not covered).
+            One handle per access, one single-dword load per component: multi-component raw loads through a heap handle crash
+            WARP's shader JIT (0xC0000005 at dispatch)."""
+            h, off, valid = addr_lookup(a)
+            comps = []
+            for k in range(count):
+                o = off if k == 0 else i("add", off, str(4 * k))
+                r = fresh()
+                emit("%s = call %%dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %%dx.types.Handle %s, i32 %s, i32 undef, i8 1, i32 4)"
+                     % (r, h, o))
+                w = fresh()
+                emit("%s = extractvalue %%dx.types.ResRet.i32 %s, 0" % (w, r))
+                c = fresh()
+                emit("%s = select i1 %s, i32 %s, i32 0" % (c, valid, w))
+                comps.append(c)
+            used.add("@dx.op.rawBufferLoad.i32(")
+            return comps
+
+        def store_elements(text, count):
+            if count == 1:
+                return [operand(text)]
+            text = text.strip()
+            end = text.index("}") + 1
+            lit, rest = text[:end], text[end:].strip()
+            if rest.startswith("{"):
+                return re.findall(r"i32 ([^,}\s]+)", rest)[:count]
+            if rest in aggs:
+                return aggs[rest][:count]
+            if rest:
+                vals = []
+                for k in range(count):
+                    r = fresh()
+                    emit("%s = extractvalue %s %s, %d" % (r, lit, rest, k))
+                    vals.append(r)
+                return vals
+            return re.findall(r"i32 ([^,}\s]+)", lit)
 
         if name == "Med3_F32":
             a, b, c = [operand(x) for x in args]
@@ -375,6 +532,54 @@ def lower(text):
             w = fresh()
             emit("%s = extractvalue %%dx.types.ResRet.i32 %s, 0" % (w, r))
             bytes_[dst] = i("lshr", w, i("shl", i("and", off, 3), 3))
+        elif name.startswith("global_load_dword") and name.endswith("_with_cache"):
+            count = {"global_load_dword_with_cache": 1, "global_load_dwordx2_with_cache": 2,
+                     "global_load_dwordx3_with_cache": 3, "global_load_dwordx4_with_cache": 4}[name]
+            comps = raw_load(operand(args[0]), count)
+            if count == 1:
+                emit("%s = add i32 %s, 0" % (dst, comps[0]))
+            else:
+                agg_comps[dst] = comps
+        elif name == "s_load_dword_with_cache":
+            comps = raw_load(operand(args[0]), 1)
+            emit("%s = add i32 %s, 0" % (dst, comps[0]))
+        elif name.startswith("global_store_dword"):
+            count = {"global_store_dword_with_cache": 1, "global_store_dwordx3_with_cache": 3,
+                     "global_store_dwordx4_with_cache": 4}[name]
+            h, off, _ = addr_lookup(operand(args[0]))
+            for k, v in enumerate(store_elements(args[1], count)):
+                o = off if k == 0 else i("add", off, str(4 * k))
+                emit("call void @dx.op.rawBufferStore.i32(i32 140, %%dx.types.Handle %s, i32 %s, i32 undef, i32 %s, i32 undef, i32 undef, i32 undef, i8 1, i32 4)"
+                     % (h, o, v))
+            used.add("@dx.op.rawBufferStore.i32(")
+        elif name in ("global_atomic_add", "global_atomic_sub"):
+            h, off, valid = addr_lookup(operand(args[0]))
+            v = operand(args[1])
+            if name.endswith("_sub"):
+                v = i("sub", "0", v)
+            r = fresh()
+            emit("%s = call i32 @dx.op.atomicBinOp.i32(i32 78, %%dx.types.Handle %s, i32 0, i32 %s, i32 0, i32 0, i32 %s)" % (r, h, off, v))
+            used.add("@dx.op.atomicBinOp.i32(")
+            emit("%s = select i1 %s, i32 %s, i32 0" % (dst, valid, r))
+        elif name in ("global_atomic_fmin", "global_atomic_fmax"):
+            # no float atomic in DXIL: order-preserving integer key (= bits ^ (bits >> 31 | 0x80000000)) with UMin/UMax.
+            # Correct for every non-NaN value (fmin(-0, +0) picks -0); a NaN in memory is replaced rather than kept.
+            h, off, valid = addr_lookup(operand(args[0]))
+            bits = fresh()
+            emit("%s = bitcast float %s to i32" % (bits, operand(args[1])))
+            m1 = i("ashr", bits, "31")
+            m2 = i("or", m1, "-2147483648")
+            key = i("xor", bits, m2)
+            old = fresh()
+            emit("%s = call i32 @dx.op.atomicBinOp.i32(i32 78, %%dx.types.Handle %s, i32 %d, i32 %s, i32 0, i32 0, i32 %s)"
+                 % (old, h, 6 if name.endswith("fmin") else 7, off, key))
+            used.add("@dx.op.atomicBinOp.i32(")
+            o1 = i("ashr", old, "31")
+            o2 = i("or", o1, "-2147483648")
+            ob = i("xor", old, o2)
+            of = fresh()
+            emit("%s = bitcast i32 %s to float" % (of, ob))
+            emit("%s = select i1 %s, float %s, float 0.0" % (dst, valid, of))
         else:
             out.append(line)
             continue
@@ -387,11 +592,19 @@ def lower(text):
     for nm in set(re.findall(r"^declare [^@\n]*@(xbox\.[\w.]+)\(", res, re.M)):
         if nm not in still:
             res = re.sub(r"(; Function Attrs:[^\n]*\n)?declare [^\n]*@" + re.escape(nm) + r"\([^\n]*\n\n?", "", res)
+    if "call float @llvm.copysign.f32(" not in res:
+        res = re.sub(r"(; Function Attrs:[^\n]*\n)?declare float @llvm\.copysign\.f32\([^\n]*\n\n?", "", res)
     add = [DECLS[k] for k in sorted(used) if not re.search(r"^declare [^\n]*" + re.escape(k), res, re.M)]
     if add:
         res = insert_decls(res, add)
     if "%dx.types.fouri32" in res and "%dx.types.fouri32 = type" not in res:
         res = res.replace("%dx.types.Handle = type { i8* }\n", "%dx.types.Handle = type { i8* }\n%dx.types.fouri32 = type { i32, i32, i32, i32 }\n", 1)
+    for tline in ("%dx.types.ResRet.i32 = type { i32, i32, i32, i32, i32 }",
+                  "%dx.types.ResRet.i64 = type { i64, i64, i64, i64, i32 }",
+                  "%dx.types.ResourceProperties = type { i32, i32 }"):
+        key = tline.split(" = ")[0]
+        if key in res and tline not in res:
+            res = res.replace("%dx.types.Handle = type { i8* }\n", "%dx.types.Handle = type { i8* }\n" + tline + "\n", 1)
     res = renumber(res)
     left = set(re.findall(r"call [^@\n]*@(xbox\.[\w.]+)\(", res))
     return res, n_lowered, left

@@ -94,9 +94,16 @@ the model uses the same formulas as the lowering, so this checks the plumbing. T
 it is what the Hillis-Steele prefix sums in these shaders (masks `0xAAAAAAAA`/`0xCCCCCCCC`/`0xF0F0F0F0` with swizzle offsets 30/60/120) require.
 The other 31 shaders use `global_load/store/atomic` and `s_load` on 64-bit addresses (plus one `TypedLoad`). Those addresses are not derived inside the shader:
 they are 64-bit fields read from buffers (for example `rawBufferLoad.i64` at offset 24 of an input record), so they are GPU virtual addresses that the game obtained from the device.
-Design for them: the proxy records every resource's (virtual address, size, descriptor) when it is created, the lowered shader looks the address up in that table
-(range search in a constant table) and loads through `ResourceDescriptorHeap[i]` (SM 6.6) at `address - base`. It needs the real addresses, so it waits for the game or a captured input;
-raw buffers are limited to 4 GiB per view.
+**Address lowering (implemented)**: the proxy records each resource's (virtual address, size, heap slot) when it is created. The lowered shader finds the
+entry with a branchless binary search over a sorted 16-entry table of (u64 base, u64 size, u32 slot) and accesses through `dx.op.createHandleFromHeap`
+(SM 6.6 `ResourceDescriptorHeap`) at `address - base`; slot 0 holds the table, slot 1 a dummy for addresses no entry covers, 2 and up the resources.
+`xbox_dxil_lower.py` lowers all of it: multi-dword loads and stores become one access per dword (a multi-component raw load through a heap handle crashes
+WARP), `global_atomic_sub` is an add of the negated value, and `global_atomic_fmin/fmax`, which DXIL has no float atomic for, use `UMin`/`UMax` on the
+order-preserving key `bits ^ (bits >> 31 | 0x80000000)` (correct for every non-NaN value; a NaN in memory is replaced instead of ignored). All 52 container
+blobs now lower, assemble and sign; `addr_kernel.ll` + `addrmap_test.cpp` (run by `addr_test.py`) exercise every lowered access against a CPU model on an
+RTX 5080 and on WARP with 0 mismatches. Still needed to dispatch the real shaders: build the table and descriptor heap from the resources the builder
+creates, and create the pipeline with a root signature that carries `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` (the builder's own signatures do not).
+Raw buffers are limited to 4 GiB per view.
 
 **`TypedLoad.i32` and LeafRehydration (blob 48) on NVIDIA**: blob 48 is the only `TypedLoad.i32` user, with two calls
 `TypedLoad.i32(i32 138, handle u0 = compressedBVH (RWByteAddressBuffer), i32 offset, i32 65)`; only component 0 of the `ResRet.i32` is used.
@@ -151,6 +158,14 @@ here. Nothing was dispatched, so whether the upscaler's output is unchanged by t
 The first-chance `0xe06d7363` that `ffx_test` prints during `D3D12CreateDevice` also appears on WARP and is caught inside `D3D12Core`.
 This is the same finding the Xbox2Windows project reports (slot 76, layout `0x101`), reached here by running the code instead of translating it.
 No dispatch was run: it needs real textures, a command list and the package's shaders.
+
+**Shader containers**: the upscaler embeds 29 compute containers whose chunk table is `SFI0/ISG1/OSG1/PSV0/RTS0/HASH/ACCC` and has no
+`DXIL` part, so the code is precompiled RDNA2 and the provider creates the pipeline states from them through a deserialization callback,
+with a separate backend as fallback when a container has no usable `ACCC`. Each payload holds one program (1,184-17,760 bytes, one
+`s_endpgm`-shaped word). Described, not decoded: `R0Y00/Xbox2Windows` (MIT) decodes these streams with LLVM's gfx1030/gfx1013 decoders
+and runs passes 24-26 and RCAS on a PC GPU, and its pinned `XboxBvhBuilder.dll` hash is the one in this package. The title's own shaders
+do not use this container (XBOX_SHADERS.md); plans for it are in FSR4_ACCC_PLAN.md. The loader also references
+`amd_fidelityfx_framegeneration_xbox.dll`, which this package does not ship.
 
 `xbox_device_proxy.h` is the reusable part: an object whose vtable forwards every slot to the PC object by generated thunks (with per-slot hit
 counters, `PrintHits`) and lets selected slots be replaced. It is the starting point for the "D3D12.X runtime" row.

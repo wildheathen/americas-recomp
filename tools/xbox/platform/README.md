@@ -12,6 +12,12 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
 * `bvh_test.cpp` and `ffx_test.cpp` run the package's BVH builder and FidelityFX DLLs on a PC D3D12 device behind `xbox_device_proxy.h` (what works and where it stops: PLATFORM_SURFACE.md).
 * `bink_test.cpp` loads `Bink2Scarlett.dll` next to a stand-in `xmem.dll`, decodes every frame of a video and saves two frames as raw BGRA.
   `carve_bink.py <movies.rpf> <out_dir> [count]` extracts Bink videos from the archive (they are stored raw).
+* `addr_kernel.ll`, `addr_test.py` and `addrmap_test.cpp` cover the 64-bit-address lowering. The kernel calls the Xbox
+  `global_load/store/atomic` and `s_load` intrinsics; the lowering replaces every access with a lookup in a 16-entry (base, size,
+  heap slot) table read through `ResourceDescriptorHeap` (slot 0 = table, 1 = dummy, 2 and up = the resources), then the access at
+  `address - base`. `addr_test.py [groups] [dxasm] [addrmap_test]` lowers, raises to SM 6.6, assembles, signs and runs it;
+  `addrmap_test` builds the heap and compares every output word and every store/atomic target word with a CPU model, on the GPU
+  and on WARP.
 
 * `xgr/idl_table.py <dir of IDLs> <table.json>` reads the interface definitions of another xgameruntime reimplementation (Xodus, LGPL-2.1; not part of this repo) and
   `xgr/gen_stub.py <table.json> <out_dir>` generates a logging stand-in `xgameruntime.dll` from it (60 interfaces, 1505 vtable slots). With `XGR_LOG=<file>` it records which
@@ -35,9 +41,10 @@ Static imports only: calls made through GetProcAddress, COM or vtables do not sh
 * Lower and sign: `dxc -dumpbin` -> `xbox_dxil_lower.py in.ll out.ll` -> `dxasm in.ll out.dxil` (replaces `@xbox.*` intrinsics; handles min/max f16 and med3 so far;
   it reports the intrinsics it could not replace). `dxil_sm66_wave.py` pins the wave size when a shader depends on 64 lanes.
 * Try: `bvh_test.exe` with `BVH_REPLACE_DIR=<dir of repl_NN.dxil>` for pipeline creation; `dispatch_test.exe shader.dxil [groups] [seed]` for a dispatch on GPU and WARP.
-* `lower_all.py <dir> <out>` runs the whole chain on a directory of disassembled shaders (22 of the 53 builder shaders pass). `oplower_check.py`, `wavelower_check.py` and `typedload_check.py` check lowered operations against software models.
+* `lower_all.py <dir> <out>` runs the whole chain on a directory of disassembled shaders (52 of the 53 builder pipelines, i.e. all 52 containers, assemble and sign). `oplower_check.py`, `wavelower_check.py` and `typedload_check.py` check lowered operations against software models.
 * `dxasm --hash-only in.ll out.dxil` assembles without validating and writes only the container hash (`dxil_hash.h`), so a partly lowered shader that still calls `@xbox.*` intrinsics can be given to a PC driver.
 * `XS_TRACE=1` makes every proxy log the first call of each forwarded slot (argument registers, caller): one run shows which Xbox-only slots a program uses.
-* Not done: the 31 shaders using raw 64-bit addresses (design in PLATFORM_SURFACE.md).
+* Not done: the 31 shaders using raw 64-bit addresses are lowered and assemble, but a dispatch needs a descriptor heap built from the
+  resources the builder creates and a heap-indexed root signature (see PLATFORM_SURFACE.md and `addr_kernel.ll`).
 
 No game files are part of this repository: the DLLs, the videos and the decoded frames stay local.
