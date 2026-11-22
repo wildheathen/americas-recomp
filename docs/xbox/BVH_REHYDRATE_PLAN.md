@@ -75,10 +75,11 @@ triangle counts match the BLAS's per-index leaf counts exactly where the BLAS us
 
 Milestone 3, done: the graphics segment is a concatenation of `42 40 00 00` pages in stored order. `tools/xbox/rage9_dump_cell.py`
 finds the shortest page run that validates the vertex-buffer header of every geometry (for this drawable: two pages from `0x39e84d00`,
-113,600 bytes, 10 of 10 headers) and writes each geometry's whole vertex block and packed index buffer. Each vertex block keeps the
-per-geometry **record stride** (20, 24 or 36 bytes here, from `(vb_len - pos_offset) / vertex_count`), with the 8-byte quantized
-position at the vertex-format offset 128 and the 32-byte origin/axis/scale header at 96. Reading only the 8-byte position attribute was
-the earlier mistake that produced garbage coordinates.
+113,600 bytes, 10 of 10 headers) and writes each geometry's whole vertex block and packed index buffer. The 32-byte origin/axis/scale
+header sits at 96 and the quantized positions start at the vertex-format offset 128. **Correction (milestone 7):** the block stores
+each attribute in its own stream, so the positions are one contiguous run of 8-byte records and the other attributes follow it;
+`(vb_len - pos_offset) / vertex_count` (20 to 44 bytes) is the byte count per vertex over all streams, not a record stride.
+Reading position `i` at `128 + i * that count` was right only for the first vertices and produced the long sliver triangles.
 
 Milestone 4, done: `tools/xbox/rage9_export_geometry.py` converts a dumped geometry to what the rehydration library understands, because
 the library only decodes standard DXGI formats (it made no sense of vertex format 16 or index format 53 and ran off the end of the
@@ -89,7 +90,7 @@ optional seventh `--geom` value, the vertex byte offset.
 End-to-end result on `bvh_08` (6 geometries of drawable B, 1,700 leaves): the library rehydrates with `S_OK` and the
 CPU model output is **byte-identical** (0 of 199,744 bytes differ). The model's box16 sentinel was the last difference: the builder
 writes +-inf (`0x7C00` / `0xFC00`) when a box exceeds half range, not the 65,504 saturation the model used, so the model now follows the
-library. Two boxes of the builder output are inverted in x; they come out of the library itself (same bytes) and are kept as measured.
+library. Two boxes of the builder output were inverted in x; they came from the decoder, not the builder (milestone 7).
 Leaf coverage per geometry index matches the drawable's triangle counts exactly (5/3, 131/66, 1020/518, 264/139, 1168/617, 654/357),
 which closes the index-to-mesh mapping.
 
@@ -98,7 +99,8 @@ leaf primitive slots give the exact triangle count per index, and the drawable's
 signatures identify the drawable. In the 1 GB window it enumerates 1,158 drawables and matches, with a unique hit, `bvh_00` ->
 drawable A (68/234/48) and `bvh_08` -> drawable B; `bvh_02` ->
 drawable C is a prefix match (the BLAS uses 3 of its 7 geometries). Rehydrating those two new cases gives `S_OK`
-and byte-identical model output again (`bvh_00`: 0/18,880; `bvh_02`: 0/33,280; the latter has three inverted boxes, same as the library).
+and byte-identical model output again (`bvh_00`: 0/18,880; `bvh_02`: 0/33,280; the latter had three infinite box16 bounds, same as
+the library, which also came from the decoder errors fixed in milestone 7).
 
 Milestone 6, partial: the leaf index is the position in the geometry list **of the geometries the BVH uses**, which can be a
 subsequence of the drawable. `bvh_01` matches the 13-geometry drawable in stream `0x39c05010` uniquely after skipping index 8
@@ -108,6 +110,33 @@ bounds check. `bvh_04` (124 candidates) and `bvh_09` (2 plus 9 in the second win
 window; `bvh_06` is outside both (16 of its 29 counts exist in no geometry of the window). The selection rule itself is not yet known
 and is the first open task in `docs/xbox/DRAWABLE_HANDOFF.md`.
 
+Milestone 7, done: **geometry checks that do not depend on the library.** A byte-identical library result only shows that the model
+and the library agree on the input; wrong vertices give the same wrong output in both. Three checks use what the compressed BLAS itself
+recorded from the true geometry:
+
+1. *Header bounds.* The header AABB, mapped through the leaf transform, must contain every rehydrated leaf.
+2. *Stored box overrides.* Box groups carry per-component override values written by the original build. Each must lie inside the
+   range the leaves give for that slot and be no looser than it.
+3. *Hierarchy fit.* The stored topology was built on the true triangles, so the total surface area of the internal boxes drops sharply
+   when the geometry is right.
+
+They found two decoder errors that the library comparison could not see:
+
+- The quantized-8 positions are a separate stream of 8-byte records (see milestone 3). Reading them interleaved left 17-31 % of the
+  edges longer than half the mesh diagonal; reading the stream leaves 0 % on 9 of 12 geometries and at most 4 % on the rest.
+- The BLAS is built from the geometry in the frame of its 208-byte instance descriptor: the 3x4 at `+0x50`, row major, applied as the
+  geometry transform (`x' = M * x`). The ten samples carry the identity or an axis-aligned 90-degree rotation. Without it 175 of 181
+  leaves of `bvh_00` and 207 of 273 of `bvh_02` lie outside the header bounds; with it, none. The transposed matrix does not fit
+  (`bvh_00`: 173 outside). The quantized `axis` word is correct as decoded; the rotation is the instance's.
+
+`rage9_export_geometry.py` reads the position stream and takes `--instance <descriptor>`. With both fixes, on the three verified
+samples: 0 leaves outside the header bounds, 23 of 23 stored overrides consistent on `bvh_08` (12 of 23 before), internal box area
+3.6-7.4 % of the previous decode, `validate_rehydrated_bvh` clean with zero tolerance (no inverted, infinite or unenclosed box), and the
+library still returns `S_OK` with 0 differing bytes against the model (18,880 / 33,280 / 199,744 bytes).
+
+The validator now treats `+-inf` as a valid conservative bound and fails only on NaN; an infinite outer bound no longer turns the
+enclosure tolerance into NaN.
+
 ## Open questions
 
 - ~~The geometry index array lives in the drawable, not in the BLAS.~~ Resolved with a nuance: the drawable's primary-LOD geometry list
@@ -116,10 +145,10 @@ and is the first open task in `docs/xbox/DRAWABLE_HANDOFF.md`.
   were the fact source: a geometry record points to the vertex buffer at `+8` and to the meshlet descriptor, which selects the index
   buffer, at `+64`; the buffers' own descriptors carry the vertex/reference/triangle counts. The parser is our own; the reference
   implementation is GPL-3 and no code was copied.
-- The bound checks need a decision: the builder writes `+-inf` for a bound beyond half range, and `validate_rehydrated_bvh` currently
-  counts those as non-finite errors (three on `bvh_02`) although the library writes the same bytes; only NaN should fail. Separately,
-  `bvh_08` has two genuinely inverted boxes (x range crossed) that come out of the library as well, so the cause has to be found in the
-  node's triangle vertices, not in the rehydration.
+- ~~The bound checks need a decision.~~ Resolved in milestone 7: `+-inf` is valid, only NaN fails, and the inverted and infinite boxes
+  were decoder errors.
+- The meaning of the quantized `axis` word beyond the three values seen (0 and 2 here), and whether the instance transform can carry a
+  translation or a non-orthogonal part; every sample so far is a pure axis-aligned rotation.
 - The drawable decoder finds a drawable by name inside the inflated streams; for a resource whose name is not known, the dictionary
   entry (name + hash) still has to be located, and the graphics page run is searched in stored order, which worked here but needs a
   check on a drawable whose pages are not adjacent.

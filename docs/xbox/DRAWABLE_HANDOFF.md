@@ -22,13 +22,15 @@ Tools (all in `tools/xbox`):
 
 Plan and measurements: `docs/xbox/BVH_REHYDRATE_PLAN.md`, `docs/xbox/BVH_CONTAINER.md`.
 
-Verified end to end (library `S_OK`, CPU model byte-identical to the library):
+Verified end to end (library `S_OK`, CPU model byte-identical to the library, and since the decoder fixes of plan milestone 7 also
+checked against what the BLAS itself stores: every leaf inside the header bounds, every stored box override consistent, validation
+clean with zero tolerance):
 
 | BLAS | geometries | bytes | difference | identification |
 | --- | --- | --- | --- | --- |
 | `bvh_00` | 3 | 18,880 | 0 | unique exact signature [68, 234, 48] |
-| `bvh_02` | 3 of 7 | 33,280 | 0 | unique prefix [116, 336, 90]; 3 non-finite (inf) boxes from the library |
-| `bvh_08` | 6 | 199,744 | 0 | unique exact signature [5, 131, 1020, 264, 1168, 654]; 2 inverted boxes |
+| `bvh_02` | 3 of 7 | 33,280 | 0 | unique prefix [116, 336, 90]; instance rotation y<->z, x negated |
+| `bvh_08` | 6 | 199,744 | 0 | unique exact signature [5, 131, 1020, 264, 1168, 654]; identity instance |
 
 Signature matching over the 1 GB window (1,158 drawables, 5,346 geometries, 1,046 distinct counts):
 
@@ -70,16 +72,21 @@ System pointers are u64 based at `0x50000000`; graphic pointers at `0x60000000`.
 - model: geometry pointer array `+8`, count `+16` (`==` `+18` and `+54`), plus a pointer at `+0x20` to a u16 array that was
   `0..count-1` (identity) on every drawable checked; purpose unknown.
 - geometry (160-byte record): vertex buffer `+8`, index/meshlet descriptor pointer `+64`.
-- vertex buffer: u32 element count `+8`, u16 record stride in bytes `+12`, data pointer `+24`, vertex-format descriptor `+64`.
+- vertex buffer: u32 element count `+8`, u16 element size in bytes `+12`, data pointer `+24`, vertex-format descriptor `+64`.
 - vertex format descriptor (320 bytes): position offset `+0`, position size `+0xD0`, position format `+0x104`, flags `+0x138`
   with vertex count `= flags >> 10`.
 - index descriptor: index buffer pointer `+0`, u16 cluster count `+8`, u16 triangle count `+10`, u32 binding `+12`.
 - index buffer: u32 element count `+8`, u16 stride `+12`, data pointer `+24`.
-- `vb_len = elements * stride`; the **record stride is per geometry** and is `(vb_len - position_offset) / vertex_count`
-  (20, 24 or 36 bytes seen). The position attribute is 8 bytes for quantized-8; using 8 as the stride was the bug that produced
-  garbage coordinates.
+- `vb_len = elements * element size`. The block keeps **each attribute in its own stream**: the quantized-8 positions are one
+  contiguous run of 8-byte records from `position_offset`, and the other attributes follow. `(vb_len - position_offset) /
+  vertex_count` (20 to 44 bytes seen) is the byte count per vertex over all streams, **not** a position stride; reading position `i`
+  at `position_offset + i * that count` is right only for the first vertices and was the cause of the sliver triangles, the two
+  inverted boxes of `bvh_08` and the infinite bounds of `bvh_02`.
 - quantized-8: 32-byte header at `position_offset - 32` (3 f32 origin, u32 axis, 3 f32 scale); each vertex packs x in 24 bits,
-  y in 24 bits, z in 16 bits, slot order fixed by the axis word.
+  y in 24 bits, z in 16 bits, slot order fixed by the axis word (decoded in `bvh_rehydrate_cpu._read_vertex`).
+- instance transform: the BLAS is built from the geometry in the frame of its 208-byte instance descriptor, the 3x4 at `+0x50`
+  (row major, `x' = M * x`). The samples carry the identity or an axis-aligned 90-degree rotation (`bvh_00`: about y; `bvh_02`:
+  y<->z with x negated); without it most leaves fall outside the header bounds. The transposed matrix does not fit.
 - meshlet index format: decode is in `bvh_rehydrate_cpu._read_triangle_indices`; expand primitives `0..triangles-1` in order.
 - graphics segment: concatenation of `42 40 00 00` streams in stored order. The tool takes the shortest run (up to 6 pages) that
   validates the vertex header of every geometry; for the verified drawable that was 2 pages from `0x39e84d00`, 113,600 bytes.
@@ -94,12 +101,14 @@ ordinary vertices/indices and run out of bounds (access violation inside `XboxBv
 ```powershell
 python -I tools\xbox\rage9_match_drawables.py <window.rpf> <blas.bin> ...
 python -I tools\xbox\rage9_dump_cell.py <window.rpf> <drawable name> <out_dir> [indices]
-python -I tools\xbox\rage9_export_geometry.py <out_dir>
+python -I tools\xbox\rage9_export_geometry.py <out_dir> --instance <instance208 descriptor of the BLAS>
 python -I tools\xbox\compare_bvh_geometry.py <blas.bin> --geom <vb> <ib> 12 <count> 6 42 0 [--geom ...] `
     --dll <path>\rehydrate_cpu.exe --out report.json
 ```
 
-`compare_bvh_geometry.py` prints model validity/leaf metrics and `diff_bytes` against the library; 0 is the target.
+`compare_bvh_geometry.py` prints model validity/leaf metrics and `diff_bytes` against the library; 0 is the target. A difference of 0
+does not prove the geometry: wrong vertices give the same wrong output in the model and the library. Check the model validity (no
+inverted or unenclosed box with zero tolerance) and the header bounds as well; plan milestone 7 lists the three checks.
 The drawable name is needed by `rage9_dump_cell.py` only; it is a plaintext string in the system page, and the matcher prints the
 names of the candidates locally. **Do not put those names, buffers or reports in the repository.**
 
@@ -114,9 +123,9 @@ skipped one are shifted down by one. `bvh_07` suggests a 3-of-12 selection. The 
 
 Ideas, in order of cost:
 
-1. Reconstruct the leaf triangles (the TRI0/TRI1 nodes store the three vertices) per `geom_index`, and compare vertex sets or AABBs
-   with each candidate geometry's triangles. This confirms the subsequence mapping for `bvh_01`/`bvh_03`/`bvh_07` independently of
-   counts, and it is the same tool needed for 5.2.
+1. Rehydrate each candidate mapping and score it with the checks of plan milestone 7 (header bounds, stored box overrides, internal
+   box area). With the decoder fixed these discriminate geometry, so they confirm the subsequence mapping for
+   `bvh_01`/`bvh_03`/`bvh_07` independently of counts; it is the same tool needed for 5.2.
 2. Check whether the skipped geometry is the one whose data is absent from the resolved graphics pages (streamed separately).
    `rage9_dump_cell.py` validates all headers of the run it picks; dump all geometries and see if the skipped one fails first.
 3. Look at the 160-byte geometry record's remaining words (12-13 look like hashes, 14-15 unknown) and at the u32 `binding` at
@@ -129,27 +138,18 @@ rehydration difference still 0 when the predicted mapping is used.
 
 ### 5.2 Remaining samples
 
-- `bvh_04` (124 candidates) and `bvh_09` (2 + 9 candidates): disambiguate by per-index AABB from the leaf triangles against each
-  candidate geometry. The union of a leaf's boxes for one index is the referenced mesh's bounds, so a single candidate should remain.
+- `bvh_04` (124 candidates) and `bvh_09` (2 + 9 candidates): rehydrate each candidate (with the BLAS's instance transform) and keep
+  the one whose leaves fit the header bounds and the stored overrides with the smallest internal box area.
 - `bvh_05`: no exact or subsequence match in either window; try a small count tolerance (degenerate triangles dropped) and the
   other carved windows, and the AABB method.
 - `bvh_06`: its drawable is outside both windows (16 of 29 counts do not exist); carve another window or record it as unavailable.
 - `bvh_07`: confirm or drop the subsequence candidate with the AABB check.
 
-### 5.3 Bound-box checks and the validator
+### 5.3 Bound-box checks and the validator (done)
 
-Two different things are conflated in `validate_rehydrated_bvh`:
-
-1. `bvh_02` reports three `non-finite AABB` errors. Those boxes carry the builder's intentional `+-inf` (`0x7C00` / `0xFC00`),
-   written when a bound exceeds half range, and the library writes the same bytes. Treating infinity as an error is a validator gap:
-   only NaN should fail, infinity is a valid conservative bound. Fix the validator, add a test with an infinite box, and the
-   enclosure check can then run on those nodes too.
-2. `bvh_08` reports two `inverted AABB` errors (for example min x 41,664.004 against max x 39,168). They are in the library output
-   as well (difference 0). Decode the node's triangle vertices and check the area: if the triangle is degenerate, keep the boxes and
-   document them; otherwise look for a rounding difference in the encoder.
-
-Acceptance: `bvh_00`, `bvh_02` and `bvh_08` validate cleanly under the corrected rules, the test suite covers an infinite box, and the
-inverted case is explained in the plan.
+`validate_rehydrated_bvh` now accepts `+-inf` bounds (the builder's box16 overflow) and fails only on NaN, with tests for both. The
+`bvh_02` infinite bounds and the `bvh_08` inverted boxes were decoder errors (separate position stream, instance transform); with the
+fixes all three verified samples validate cleanly with zero tolerance. See plan milestone 7.
 
 ### 5.4 Replace `assign_bvh_geometry.py`
 
@@ -162,8 +162,8 @@ impossible.
 
 - The drawable name is plaintext in the system page (pointer at `+168`), so the hashed dictionaries are not needed to name a
   drawable. Keep the names out of the repository; state the fact, not the strings.
-- Keep `BVH_REHYDRATE_PLAN.md` in sync with the subsequence result (it is updated for now), and record the per-geometry record stride
-  and the box16 inf sentinel in `BVH_CONTAINER.md` next to the rehydration section.
+- Keep `BVH_REHYDRATE_PLAN.md` in sync with the subsequence result (it is updated for now), and record the position stream, the
+  instance transform and the box16 inf sentinel in `BVH_CONTAINER.md` next to the rehydration section.
 
 ### 5.6 Second window and robustness
 

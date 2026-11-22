@@ -2,10 +2,11 @@
 
 The graphics segment is a concatenation of 42 40 00 00 pages in stored order. This finds the page sequence that validates every
 vertex-buffer header of the drawable, then writes for each geometry:
-  g<i>_vb.bin  the whole vertex block (the quantized positions start at voff, with the 32-byte origin/axis/scale header before them)
+  g<i>_vb.bin  the whole vertex block: the 32-byte origin/axis/scale header before voff, then one stream per attribute, starting
+               with the quantized positions (8 bytes per vertex) at voff
   g<i>_ib.bin  the packed meshlet index buffer
-and a manifest with what the rehydration tools need, including the per-vertex record stride (20/24/36 bytes, not the 8-byte
-position attribute) and voff.
+and a manifest with what the rehydration tools need, including voff and "stride", the block's bytes per vertex over all streams
+(20 to 44), which is not the position stride.
 
 usage: python -I rage9_dump_cell.py <window.rpf> <drawable name> <out_dir> [indices]
 """
@@ -89,7 +90,7 @@ class W:
                             "pos_off": self.u32(fvf), "pos_size": self.s[fvf + 0xD0],
                             "pos_fmt": self.s[fvf + 0x104],
                             "ib": self.u64(ib + 24) - BASE_GFX, "ib_len": self.u32(ib + 8) * self.u16(ib + 12)})
-        for g in out:   # the per-vertex stride is the whole record, not just the position attribute
+        for g in out:   # bytes per vertex over all attribute streams; positions are their own 8-byte stream
             g["stride"] = (g["vb_len"] - g["pos_off"]) // g["vertices"] if g["vertices"] else 0
         return out
 
