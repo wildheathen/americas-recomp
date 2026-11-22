@@ -24,7 +24,87 @@ using Microsoft::WRL::ComPtr;
 #include "bvh_dummy_cs.h"      // g_dummy: an empty compute shader, used in place of a blob the PC compiler cannot take
 static int g_pipe = 0, g_crashed = 0, g_failed = 0;
 static const char* g_dump = nullptr;     // BVH_DUMP_DIR: write every shader blob handed to the device
+static bool Trace() { static const bool on = getenv("BVH_TRACE") != nullptr; return on; }
 
+// BVH_TRACE=1: log the overridden device slots and the command-list calls, so a fault in a builder thread can be located.
+static std::vector<void*> g_heapProxies;
+static std::vector<ID3D12RootSignature*> g_signatures;   // created from RTS0, in SlotRootSignature order
+static ID3D12DescriptorHeap* UnwrapHeap(ID3D12DescriptorHeap* h) {
+    for (void* p : g_heapProxies) if (p == (void*)h) return (ID3D12DescriptorHeap*)((XboxObjectProxy*)p)->real;
+    return h;
+}
+static HRESULT __fastcall Trace14(XboxObjectProxy* self, const D3D12_DESCRIPTOR_HEAP_DESC* d, REFIID iid, void** out) {
+    HRESULT hr = ((ID3D12Device*)self->real)->CreateDescriptorHeap(d, iid, out);
+    if (SUCCEEDED(hr) && out && *out && iid == __uuidof(ID3D12DescriptorHeap)) {
+        auto* h = XboxObjectProxy::Create((IUnknown*)*out, "descriptor heap");
+        h->Override(9, (void*)xbox_overrides::HeapCpuStart);
+        h->Override(10, (void*)xbox_overrides::HeapGpuStart);
+        g_heapProxies.push_back(h);
+        *out = h;
+    }
+    if (Trace()) fprintf(stderr, "T device14: heap type %d count %u -> 0x%08lx\n", d ? (int)d->Type : -1, d ? d->NumDescriptors : 0, (unsigned long)hr);
+    return hr;
+}
+static HRESULT __fastcall Trace76(XboxObjectProxy* self, const D3D12_HEAP_PROPERTIES* hp, UINT heapFlags, const unsigned char* desc, UINT state, const D3D12_CLEAR_VALUE* cv, REFIID iid, void** out) {
+    HRESULT hr = xbox_overrides::Slot76(self, hp, heapFlags, desc, state, cv, iid, out);
+    if (Trace()) {
+        const D3D12_RESOURCE_DESC* d = (const D3D12_RESOURCE_DESC*)desc;
+        fprintf(stderr, "T device76: dimension %u %llux%u format %u state %u -> 0x%08lx\n", d ? (unsigned)d->Dimension : 0,
+                d ? (unsigned long long)d->Width : 0, d ? (unsigned)d->Height : 0, d ? (unsigned)d->Format : 0, state, (unsigned long)hr);
+    }
+    return hr;
+}
+static void __fastcall Trace18(XboxObjectProxy* self, ID3D12Resource* r, const D3D12_SHADER_RESOURCE_VIEW_DESC* d, SIZE_T h) {
+    if (Trace()) fprintf(stderr, "T device18: srv resource %p -> handle %llx\n", (void*)r, (unsigned long long)h);
+    xbox_overrides::Slot18(self, r, d, h);
+}
+static void __fastcall Trace19(XboxObjectProxy* self, ID3D12Resource* r, ID3D12Resource* c, const D3D12_UNORDERED_ACCESS_VIEW_DESC* d, SIZE_T h) {
+    if (Trace()) fprintf(stderr, "T device19: uav resource %p -> handle %llx\n", (void*)r, (unsigned long long)h);
+    xbox_overrides::Slot19(self, r, c, d, h);
+}
+static void __fastcall ClDispatch(XboxObjectProxy* self, UINT x, UINT y, UINT z) {
+    if (Trace()) fprintf(stderr, "T cl Dispatch %u %u %u\n", x, y, z);
+    ((ID3D12GraphicsCommandList*)self->real)->Dispatch(x, y, z);
+}
+static void __fastcall ClSetPso(XboxObjectProxy* self, ID3D12PipelineState* pso) {
+    if (Trace()) fprintf(stderr, "T cl SetPipelineState %p\n", (void*)pso);
+    ((ID3D12GraphicsCommandList*)self->real)->SetPipelineState(pso);
+}
+static void __fastcall ClBarrier(XboxObjectProxy* self, UINT n, const D3D12_RESOURCE_BARRIER* b) {
+    if (Trace()) fprintf(stderr, "T cl ResourceBarrier %u\n", n);
+    ((ID3D12GraphicsCommandList*)self->real)->ResourceBarrier(n, b);
+}
+static void __fastcall ClSetHeaps(XboxObjectProxy* self, UINT n, ID3D12DescriptorHeap* const* heaps) {
+    std::vector<ID3D12DescriptorHeap*> real(n);
+    for (UINT i = 0; i < n && heaps; i++) real[i] = UnwrapHeap(heaps[i]);
+    if (Trace()) fprintf(stderr, "T cl SetDescriptorHeaps %u (%p -> %p)\n", n, n && heaps ? (void*)heaps[0] : nullptr, n ? (void*)real[0] : nullptr);
+    ((ID3D12GraphicsCommandList*)self->real)->SetDescriptorHeaps(n, real.data());
+}
+static void __fastcall ClSetRootSig(XboxObjectProxy* self, ID3D12RootSignature* sig) {
+    if (Trace()) fprintf(stderr, "T cl SetComputeRootSignature %p\n", (void*)sig);
+    ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootSignature(sig);
+}
+static void __fastcall ClSetTable(XboxObjectProxy* self, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE h) {
+    if (Trace()) fprintf(stderr, "T cl SetComputeRootDescriptorTable %u %llx\n", i, (unsigned long long)h.ptr);
+    ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootDescriptorTable(i, h);
+}
+static void __fastcall ClCopyBuffer(XboxObjectProxy* self, ID3D12Resource* d, UINT64 doff, ID3D12Resource* s, UINT64 soff, UINT64 n) {
+    if (Trace()) fprintf(stderr, "T cl CopyBufferRegion %llu+%llu <- %llu\n", (unsigned long long)doff, (unsigned long long)n, (unsigned long long)soff);
+    ((ID3D12GraphicsCommandList*)self->real)->CopyBufferRegion(d, doff, s, soff, n);
+}
+// Xbox command-list extension used by the BVH builder (slot 148): reserve <bytes> of command stream, <align> aligned, and return the
+// pointer to fill. The PC command list has no equivalent; the builder writes its own 40-byte records into it. A plain allocation lets it
+// continue so the next Xbox-only call becomes visible.
+static void* __fastcall ClReserve(XboxObjectProxy* self, unsigned bytes, unsigned align) {
+    (void)self; (void)align;
+    void* p = VirtualAlloc(nullptr, bytes ? bytes : 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (Trace()) fprintf(stderr, "T cl slot148 reserve %u align %u -> %p\n", bytes, align, p);
+    return p;
+}
+static void __fastcall ClSet32(XboxObjectProxy* self, UINT rootIndex, UINT value, UINT offset) {
+    if (Trace()) fprintf(stderr, "T cl SetComputeRoot32BitConstant root %u value %u offset %u\n", rootIndex, value, offset);
+    ((ID3D12GraphicsCommandList*)self->real)->SetComputeRoot32BitConstant(rootIndex, value, offset);
+}
 static ComPtr<ID3D12RootSignature> g_heapSig;
 static ID3D12RootSignature* HeapSignature(ID3D12Device* dev);   // generic signature for replacement pipelines
 // The builder creates 17 root signatures directly from the containers' RTS0 blobs through device slot 16, so the d3d12_xs shim never sees
@@ -73,9 +153,13 @@ static HRESULT __fastcall SlotRootSignature(XboxObjectProxy* self, UINT nodeMask
     HRESULT hr = D3D12SerializeVersionedRootSignature(&v, &sb, &eb);
     if (FAILED(hr)) {
         printf("  [root signature] heap-flag rewrite failed 0x%08lx, using the original\n", (unsigned long)hr);
-        return real->CreateRootSignature(nodeMask, blob, size, riid, out);
+        hr = real->CreateRootSignature(nodeMask, blob, size, riid, out);
+        if (SUCCEEDED(hr) && out && *out) g_signatures.push_back((ID3D12RootSignature*)*out);
+        return hr;
     }
-    return real->CreateRootSignature(nodeMask, sb->GetBufferPointer(), sb->GetBufferSize(), riid, out);
+    hr = real->CreateRootSignature(nodeMask, sb->GetBufferPointer(), sb->GetBufferSize(), riid, out);
+    if (SUCCEEDED(hr) && out && *out) g_signatures.push_back((ID3D12RootSignature*)*out);
+    return hr;
 }
 
 static ID3D12RootSignature* HeapSignature(ID3D12Device* dev) {
@@ -260,6 +344,12 @@ int main(int argc, char** argv) {
     g_dump = getenv("BVH_DUMP_DIR");
     proxy->Override(62, (void*)Slot62);
     proxy->Override(16, (void*)SlotRootSignature);     // XS_HEAP=1: add the descriptor-heap flag to the signatures built from RTS0
+    if (getenv("BVH_BUILD")) {                         // BVH_TRACE=1 then shows the last call before a fault in a builder thread
+        proxy->Override(14, (void*)Trace14);
+        proxy->Override(76, (void*)Trace76);
+        proxy->Override(18, (void*)Trace18);
+        proxy->Override(19, (void*)Trace19);
+    }
     if (unsigned long ex = SehCtor(ctor, obj, (ID3D12Device*)proxy)) {
         printf("  constructor raised exception 0x%lx\n", ex);
         DumpMessages(dev.Get());
@@ -301,18 +391,21 @@ int main(int argc, char** argv) {
         auto build = (BuildFn)GetProcAddress(m, BUILD);
         if (!build) { printf("Build export not found\n"); }
         else {
-            auto mkres = [&](UINT64 bytes, D3D12_RESOURCE_FLAGS fl, D3D12_RESOURCE_STATES st) {
-                D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_DEFAULT};
+            printf("  [build] start\n");
+            auto mkres = [&](UINT64 bytes, D3D12_HEAP_TYPE ht, D3D12_RESOURCE_FLAGS fl, D3D12_RESOURCE_STATES st) {
+                D3D12_HEAP_PROPERTIES hp = {ht};
                 D3D12_RESOURCE_DESC rd = {D3D12_RESOURCE_DIMENSION_BUFFER, 0, bytes, 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, fl};
                 ComPtr<ID3D12Resource> r;
                 HRESULT hr = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, st, nullptr, IID_PPV_ARGS(&r));
+                if (Trace()) fprintf(stderr, "  [build] mkres %llu -> 0x%08lx %p\n", (unsigned long long)bytes, (unsigned long)hr, (void*)r.Get());
                 if (FAILED(hr)) printf("  resource %llu bytes failed 0x%08lx\n", (unsigned long long)bytes, (unsigned long)hr);
                 return r;
             };
-            ComPtr<ID3D12Resource> vbUp = mkres(36, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-            { float* v; vbUp->Map(0, nullptr, (void**)&v);
-              float tri[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0}; memcpy(v, tri, sizeof(tri)); vbUp->Unmap(0, nullptr); }
-            ComPtr<ID3D12Resource> vb = mkres(36, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+            ComPtr<ID3D12Resource> vbUp = mkres(36, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+            { void* v = nullptr; if (SUCCEEDED(vbUp->Map(0, nullptr, &v)) && v) {
+                float tri[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0}; memcpy(v, tri, sizeof(tri)); vbUp->Unmap(0, nullptr); }
+              else printf("  vertex upload Map failed\n"); }
+            ComPtr<ID3D12Resource> vb = mkres(36, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
             D3D12_RAYTRACING_GEOMETRY_DESC g2 = {};
             g2.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
             g2.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
@@ -327,15 +420,18 @@ int main(int argc, char** argv) {
             bin.NumDescs = 1;
             bin.pGeometryDescs = &g2;
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+            printf("  [build] prebuild 2\n");
             if (unsigned long ex = SehPrebuild(prebuild, obj, &bin, &info)) printf("  build prebuild raised 0x%lx\n", ex);
             UINT64 resultBytes = (info.ResultDataMaxSizeInBytes + 255) & ~255ull, scratchBytes = (info.ScratchDataSizeInBytes + 255) & ~255ull;
             printf("  build sizes: result %llu scratch %llu\n", (unsigned long long)resultBytes, (unsigned long long)scratchBytes);
-            ComPtr<ID3D12Resource> result = mkres(resultBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            ComPtr<ID3D12Resource> scratch = mkres(scratchBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            printf("  [build] result/scratch\n");
+            ComPtr<ID3D12Resource> result = mkres(resultBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            ComPtr<ID3D12Resource> scratch = mkres(scratchBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd = {};
             bd.Inputs = bin;
             bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
             bd.DestAccelerationStructureData = result->GetGPUVirtualAddress();
+            printf("  [build] list\n");
             ComPtr<ID3D12CommandAllocator> ba;
             dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&ba));
             ComPtr<ID3D12GraphicsCommandList4> list;
@@ -347,6 +443,18 @@ int main(int argc, char** argv) {
             bar.Transition.Subresource = 0xffffffff;
             list->ResourceBarrier(1, &bar);
             XboxObjectProxy* clp = XboxObjectProxy::Create((IUnknown*)list.Get(), "cmdlist");
+            clp->Override(14, (void*)ClDispatch);      clp->Override(15, (void*)ClCopyBuffer);
+            clp->Override(25, (void*)ClSetPso);        clp->Override(26, (void*)ClBarrier);
+            clp->Override(28, (void*)ClSetHeaps);      clp->Override(29, (void*)ClSetRootSig);
+            clp->Override(31, (void*)ClSetTable);
+            clp->Override(148, (void*)ClReserve);      // Xbox extension: command-stream reservation used by the builder
+            clp->Override(33, (void*)ClSet32);
+            if (!g_signatures.empty()) {              // on Xbox the caller's root signature is still bound; set one of the builder's own
+                UINT pick = getenv("BVH_SIG") ? (UINT)atoi(getenv("BVH_SIG")) : 0;
+                if (pick >= g_signatures.size()) pick = 0;
+                list->SetComputeRootSignature(g_signatures[pick]);
+                printf("  [build] root signature %u of %zu set before Build\n", pick, g_signatures.size());
+            }
             printf("calling BuildRaytracingAccelerationStructure...\n"); fflush(stdout);
             if (unsigned long ex = SehBuild(build, obj, (ID3D12GraphicsCommandList4*)clp, &bd)) printf("  build raised exception 0x%lx\n", ex);
             else printf("  build returned\n");
@@ -366,7 +474,7 @@ int main(int argc, char** argv) {
             printf("  wait %lu, device removed reason 0x%08lx\n", (unsigned long)w, (unsigned long)dr);
             DumpMessages(dev.Get());
             if (SUCCEEDED(dr)) {
-                ComPtr<ID3D12Resource> rb = mkres(resultBytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+                ComPtr<ID3D12Resource> rb = mkres(resultBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
                 D3D12_RESOURCE_BARRIER pb = {};
                 pb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; pb.Transition.pResource = result.Get();
                 pb.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; pb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;

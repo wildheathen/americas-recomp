@@ -111,11 +111,17 @@ plus `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`) on the device proxy. With `BVH_ONLY`/`
 crashes, 0 other failures** on the RTX 5080. Without the mapping the replaced shaders do not match their signature (31-39 failures), so
 the order matters: `BVH_DUMP_DIR` first, then lower and replace by index.
 **A build call is reached but not finished**: `BVH_BUILD=1` calls `BuildRaytracingAccelerationStructure` for a three-vertex triangle with
-the Xbox device proxy (slot 76 resource creation, wrapped heaps). Prebuild answers, but the builder's worker thread then takes an access
-violation before any dispatch. Open: the descriptor heap and table the lowered shaders read (slot 0 table, 1 dummy), unwrapping the
-proxy objects in the command-list calls, and the pass wiring. Prior art for the lookup: Xbox2Windows (`src/title_va_lookup.hlsli`,
-`era_title_va.cpp`) has the same sorted-range search with alignment and whole-access checks, and makes the title's pointers valid GPU
-addresses with `OpenExistingHeapFromAddress` instead of copying, so the game's 64-bit addresses need no rewriting.
+the Xbox device proxy (slot 76 resource creation, wrapped heaps) and `BVH_TRACE=1` shows the sequence. The builder asks the command
+list for a command-stream buffer (a command-list extension at slot 148: `(count * 40, 16)` bytes, then it fills 40-byte records), which
+has no PC equivalent; the harness stubs it with a plain allocation. It then calls a method that our PC vtable maps to
+`SetComputeRoot32BitConstant` but with a single 32-bit argument and no root index or offset, so the Xbox vtable numbering differs at
+that slot; the debug layer reports the garbage index and the call faults inside `D3D12SDKLayers`. With
+`CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` the runtime also requires `SetDescriptorHeaps` before `SetComputeRootSignature`. Open: map the
+Xbox command-list extension slots (148 and the root-constant one), bind a heap carrying the table (slot 0) and the resource descriptors,
+and decode the 40-byte records. The stream suggests the build itself is an Xbox hardware command stream (`D3D12XBOX_XDXR_STREAM_DESC`),
+not a set of compute dispatches, which would put the rehydration shaders on the load path instead. Prior art for the address lookup:
+`R0Y00/Xbox2Windows` (`src/title_va_lookup.hlsli`, `era_title_va.cpp`) has the same sorted-range search with alignment and whole-access
+checks, and makes the title's pointers valid GPU addresses with `OpenExistingHeapFromAddress` instead of copying.
 
 **`TypedLoad.i32` and LeafRehydration (blob 48) on NVIDIA**: blob 48 is the only `TypedLoad.i32` user, with two calls
 `TypedLoad.i32(i32 138, handle u0 = compressedBVH (RWByteAddressBuffer), i32 offset, i32 65)`; only component 0 of the `ResRet.i32` is used.
