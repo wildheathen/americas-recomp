@@ -4,7 +4,9 @@
 // is a CPU pointer for the builder and a GPU address for its resources.
 // build: cl /nologo /EHsc /O2 /std:c++17 rehydrate_cpu.cpp d3d12.lib dxgi.lib /Fe:rehydrate_cpu.exe
 // usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6] [index.bin] [indexFormat=42]
-//   src.bin starts with the 64-byte Xbox BVH header; vb.bin holds the geometry's vertices. XboxBvhBuilder.dll must be loadable.
+//        rehydrate_cpu <src.bin> <out.bin> --geom <vb.bin> <index.bin|-> <stride> <vertexCount> <vertexFormat> <indexFormat> [--geom ...]
+//   src.bin starts with the 64-byte Xbox BVH header; the --geom form passes one D3D12_RAYTRACING_GEOMETRY_DESC per geometry, in index
+//   order. XboxBvhBuilder.dll must be loadable.
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -16,6 +18,7 @@
 #include <vector>
 #include <fstream>
 #include <iterator>
+#include <string>
 using Microsoft::WRL::ComPtr;
 #include "xbox_device_proxy.h"
 #include "bvh_dummy_cs.h"
@@ -71,17 +74,69 @@ static Aliased MakeAliased(ID3D12Device* dev, UINT64 bytes, bool zero) {
     return a;
 }
 
+struct Geometry {
+    std::vector<char> vb, ib;
+    UINT stride = 12, count = 0, vfmt = 6, ifmt = 42;
+    UINT64 vbOff = 0, ibOff = 0;
+};
+
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    if (argc < 4) { printf("usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6] [index.bin] [indexFormat=42]\n"); return 2; }
-    std::vector<char> src = Read(argv[1]), vb = Read(argv[2]);
-    std::vector<char> ib = argc > 7 ? Read(argv[7]) : std::vector<char>();
-    UINT stride = argc > 4 ? (UINT)atoi(argv[4]) : 12;
-    UINT vcount = argc > 5 ? (UINT)atoi(argv[5]) : (UINT)(vb.size() / (stride ? stride : 1));
-    UINT vformat = argc > 6 ? (UINT)atoi(argv[6]) : 6;   // DXGI_FORMAT_R32G32B32_FLOAT
-    UINT iformat = argc > 8 ? (UINT)atoi(argv[8]) : 42;  // DXGI_FORMAT_R32_UINT
+    bool multi = argc >= 4 && !strcmp(argv[3], "--geom");
+    std::vector<Geometry> geoms;
+    const char* srcPath = nullptr;
+    const char* outPath = nullptr;
+    if (multi) {
+        srcPath = argv[1];
+        outPath = argv[2];
+        for (int i = 3; i < argc;) {
+            if (strcmp(argv[i], "--geom") || i + 6 >= argc) {
+                printf("--geom needs <vb> <index|-> <stride> <count> <vertexFormat> <indexFormat>\n");
+                return 2;
+            }
+            Geometry g;
+            g.vb = Read(argv[i + 1]);
+            if (strcmp(argv[i + 2], "-")) g.ib = Read(argv[i + 2]);
+            g.stride = (UINT)atoi(argv[i + 3]);
+            g.count = (UINT)atoi(argv[i + 4]);
+            g.vfmt = (UINT)atoi(argv[i + 5]);
+            g.ifmt = (UINT)atoi(argv[i + 6]);
+            geoms.push_back(std::move(g));
+            i += 7;
+        }
+        if (geoms.empty()) { printf("no --geom given\n"); return 2; }
+    } else {
+        if (argc < 4) {
+            printf("usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6] [index.bin] [indexFormat=42]\n");
+            printf("       rehydrate_cpu <src.bin> <out.bin> --geom <vb> <index|-> <stride> <count> <vertexFormat> <indexFormat> [--geom ...]\n");
+            return 2;
+        }
+        srcPath = argv[1];
+        outPath = argv[3];
+        Geometry g;
+        g.vb = Read(argv[2]);
+        g.stride = argc > 4 ? (UINT)atoi(argv[4]) : 12;
+        g.count = argc > 5 ? (UINT)atoi(argv[5]) : (UINT)(g.vb.size() / (g.stride ? g.stride : 1));
+        g.vfmt = argc > 6 ? (UINT)atoi(argv[6]) : 6;
+        if (argc > 7) g.ib = Read(argv[7]);
+        g.ifmt = argc > 8 ? (UINT)atoi(argv[8]) : 42;
+        geoms.push_back(std::move(g));
+    }
+    std::vector<char> src = Read(srcPath);
     if (src.size() < 64) { printf("source shorter than the 64-byte header\n"); return 2; }
     UINT64 total = ((UINT64)*(const UINT32*)(src.data() + 4) + 1) << 6;
+
+    // data buffer: source at 0, then each geometry's vertex and index buffer at 4 KiB boundaries
+    UINT64 cursor = (src.size() + 0xFFF) & ~(UINT64)0xFFF;
+    for (auto& g : geoms) {
+        g.vbOff = cursor;
+        cursor += (g.vb.size() + 0xFFF) & ~(UINT64)0xFFF;
+        if (!g.ib.empty()) {
+            g.ibOff = cursor;
+            cursor += (g.ib.size() + 0xFFF) & ~(UINT64)0xFFF;
+        }
+    }
+    const UINT64 DATA_BYTES = cursor ? cursor : 0x1000;
 
     ComPtr<IDXGIFactory4> fac; CreateDXGIFactory1(IID_PPV_ARGS(&fac));
     ComPtr<IDXGIAdapter> ad; fac->EnumAdapters(0, &ad);
@@ -93,14 +148,14 @@ int main(int argc, char** argv) {
     auto validate = (ValidateFn)GetProcAddress(m, VALIDATE);
     if (!rehydrate) { printf("rehydrate export not found\n"); return 2; }
 
-    const UINT64 VB_OFF = 0x8000, IB_OFF = VB_OFF + ((vb.size() + 0xFFF) & ~(UINT64)0xFFF);
-    const UINT64 DATA_BYTES = (ib.empty() ? VB_OFF + ((vb.size() + 0xFFF) & ~(UINT64)0xFFF) : IB_OFF + ((ib.size() + 0xFFF) & ~(UINT64)0xFFF));
     Aliased data = MakeAliased(dev.Get(), DATA_BYTES, false), dst = MakeAliased(dev.Get(), total, true), scratch = MakeAliased(dev.Get(), 1 << 20, true);
     if (!data.res || !dst.res || !scratch.res || !data.base || !dst.base || !scratch.base) { printf("buffer/alias setup failed\n"); return 2; }
     memset(data.base, 0, (size_t)((DATA_BYTES + 0xFFF) & ~0xFFFull));
     memcpy(data.cpu(), src.data(), src.size());
-    memcpy(data.cpu() + VB_OFF, vb.data(), vb.size());
-    if (!ib.empty()) memcpy(data.cpu() + IB_OFF, ib.data(), ib.size());
+    for (auto& g : geoms) {
+        memcpy(data.cpu() + g.vbOff, g.vb.data(), g.vb.size());
+        if (!g.ib.empty()) memcpy(data.cpu() + g.ibOff, g.ib.data(), g.ib.size());
+    }
 
     // upload the blob into the GPU buffer at the same address
     ComPtr<ID3D12Resource> up;
@@ -121,23 +176,39 @@ int main(int argc, char** argv) {
     ComPtr<ID3D12Fence> f; dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)); q->Signal(f.Get(), 1);
     HANDLE ev = CreateEvent(0, 0, 0, 0); f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, 30000);
 
-    D3D12_RAYTRACING_GEOMETRY_DESC g = {};
-    g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-    g.Triangles.VertexFormat = (DXGI_FORMAT)vformat;
-    g.Triangles.VertexCount = vcount;
-    g.Triangles.VertexBuffer.StartAddress = data.res->GetGPUVirtualAddress() + VB_OFF;
-    g.Triangles.VertexBuffer.StrideInBytes = stride;
-    g.Triangles.IndexFormat = ib.empty() ? DXGI_FORMAT_UNKNOWN : (DXGI_FORMAT)iformat;
-    if (!ib.empty()) {
-        g.Triangles.IndexBuffer = data.res->GetGPUVirtualAddress() + IB_OFF;
-        g.Triangles.IndexCount = (UINT)(ib.size() / ((iformat == 57) ? 2 : 4));
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> descs(geoms.size());
+    for (size_t i = 0; i < geoms.size(); i++) {
+        D3D12_RAYTRACING_GEOMETRY_DESC& g = descs[i];
+        const Geometry& s = geoms[i];
+        g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        g.Triangles.VertexFormat = (DXGI_FORMAT)s.vfmt;
+        g.Triangles.VertexCount = s.count;
+        g.Triangles.VertexBuffer.StartAddress = data.res->GetGPUVirtualAddress() + s.vbOff;
+        g.Triangles.VertexBuffer.StrideInBytes = s.stride;
+        g.Triangles.IndexFormat = s.ib.empty() ? DXGI_FORMAT_UNKNOWN : (DXGI_FORMAT)s.ifmt;
+        if (!s.ib.empty()) {
+            g.Triangles.IndexBuffer = data.res->GetGPUVirtualAddress() + s.ibOff;
+            g.Triangles.IndexCount = (UINT)(s.ib.size() / ((s.ifmt == 57) ? 2 : 4));
+        }
     }
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd = {};
     bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
     bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
     bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    bd.Inputs.NumDescs = 1;
-    bd.Inputs.pGeometryDescs = &g;
+    bd.Inputs.NumDescs = (UINT)descs.size();
+    bd.Inputs.pGeometryDescs = descs.data();
+    // The library was built with the Xbox SDK; if its D3D12_RAYTRACING_GEOMETRY_DESC is padded differently from the PC one, the
+    // descriptors have to be repacked with that stride. REHYDRATE_GEOM_STRIDE=<bytes> is the probe for it.
+    std::vector<unsigned char> packed;
+    if (const char* st = getenv("REHYDRATE_GEOM_STRIDE")) {
+        size_t stride = (size_t)atoi(st);
+        if (stride >= sizeof(D3D12_RAYTRACING_GEOMETRY_DESC) && descs.size() > 1) {
+            packed.assign(descs.size() * stride, 0);
+            for (size_t i = 0; i < descs.size(); i++) memcpy(packed.data() + i * stride, &descs[i], sizeof(descs[i]));
+            bd.Inputs.pGeometryDescs = reinterpret_cast<const D3D12_RAYTRACING_GEOMETRY_DESC*>(packed.data());
+            printf("geometry descriptors packed with stride %zu (PC sizeof %zu)\n", stride, sizeof(D3D12_RAYTRACING_GEOMETRY_DESC));
+        }
+    }
     bd.SourceAccelerationStructureData = data.res->GetGPUVirtualAddress();
     bd.DestAccelerationStructureData = dst.res->GetGPUVirtualAddress();
     bd.ScratchAccelerationStructureData = scratch.res->GetGPUVirtualAddress();
@@ -154,10 +225,11 @@ int main(int argc, char** argv) {
     long vh = validate ? validate(obj, &bd) : -1;
     long rh = CallRehydrate(rehydrate, obj, (ID3D12Device11*)proxy, &bd);
     if (dtor) dtor(obj);
-    printf("validate 0x%08lx, rehydrate 0x%08lx, %llu bytes\n", (unsigned long)vh, (unsigned long)rh, (unsigned long long)total);
+    printf("validate 0x%08lx, rehydrate 0x%08lx, %llu bytes, %zu geometries\n", (unsigned long)vh, (unsigned long)rh,
+           (unsigned long long)total, geoms.size());
     if (rh != 0) return 1;
-    std::ofstream out(argv[3], std::ios::binary);
+    std::ofstream out(outPath, std::ios::binary);
     out.write(dst.cpu(), (std::streamsize)total);
-    printf("wrote %s (%llu bytes)\n", argv[3], (unsigned long long)total);
+    printf("wrote %s (%llu bytes)\n", outPath, (unsigned long long)total);
     return 0;
 }
