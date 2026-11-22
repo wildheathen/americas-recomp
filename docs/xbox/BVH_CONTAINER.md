@@ -42,3 +42,20 @@ From `XboxBvhBuilder.dll` (`RehydrateRaytracingAccelerationStructureX` / `Rehydr
 - **208-byte per-BVH header**: dwords 20-30 (`+0x50..+0x7b`, pointed to by `+0x38 = 0x50000050`) are the `Transform3x4` rotation rows (zero translation) passed to `LeafRehydration`; `+0xa0` = 256-byte-aligned used data size; `+0xa4` = packed flags and geometry count.
 - **RAGE9 geometry formats in `LeafRehydration`**: `XboxBvhBuilder.dll` extends `LeafRehydration` with two RAGE9-specific formats alongside standard DXGI formats: `IndexFormat == 53` decodes RAGE9 meshlet index buffers (`[num_meshlets, tot_tris, tot_vrefs]`, 16 B meshlet headers, 32-bit packed triangle descriptors, 16-bit vertex remap table), and `VertexFormat == 16` decodes RAGE9 8-byte quantized vertex streams using the 32-byte `(origin, slot_axis, scale)` header at `vb_start - 32`.
 - **CPU validation**: synthetic tests live in `tools/xbox/test_bvh_rehydrate_cpu.py` (no game data). Checked locally in hierarchy-only mode (no vertex/index buffers) on every dehydrated BLAS carved from `core_bvh4.rpf` (269,096) and `shared_minigame000_bvh4.rpf` (1,233): all pass node type/offset, parent-pointer, exact leaf-count and level-table count checks. Without geometry the validator also reports `Inverted AABB in box` on about 39% of them; every inverted axis checked has a 0.0 endpoint, consistent with bounds that are only complete once leaves are rehydrated. Leaf rehydration against real geometry and per-node AABBs against console output are not verified.
+
+## Rehydration on a PC (measured)
+
+- **The library's CPU entry works with aliased memory.** `RehydrateRaytracingAccelerationStructureX` reads `SourceAccelerationStructureData`,
+  the geometry addresses, `DestAccelerationStructureData` and the scratch address as CPU pointers (unified memory on the console). Mapping
+  memory at each buffer's GPU virtual address with `VirtualAlloc` and copying the data there makes the call return `S_OK`: on a synthetic
+  8-leaf BLAS the output is identical to `bvh_rehydrate_cpu.py`, and on a real 103-leaf sample from `core_bvh4.rpf` (fed synthetic
+  vertices and indices) it differs only in the placeholder values a leaf gets when its triangle is unusable.
+- **Empty-bound markers.** The library and the shaders use `FLT_MAX` (`0x7f7fffff`) for an empty bound and saturate half bounds to
+  `+/-65504` (`0x7bff`/`0xfbff`). The CPU model now uses the same values; its unit tests pass.
+- **`instance208` descriptors.** In the first nested pack of `core_bvh4.rpf` (10 BVHs, an interior cell) every BVH is preceded
+  by a 208-byte descriptor `0x50` bytes earlier in the file. The record has a 64-bit key at `+0x40`, a 3x4 transform at `+0x50`, `0x101`
+  at `+0x88`, a 64-byte-aligned offset at `+0xA0` and two `u16` counts at `+0xA4`. The key was not found, as a raw 64-bit value, in the
+  model resources of `core_restofworld.rpf` (926) or `shared_minigame000.rpf` (926), nor inside the inflated streams of `packs.rpf`
+  (143,313 streams) or `core_restofworld.rpf` (2,360 streams); it is also not a simple name hash (joaat, FNV-1a, Murmur64A, xxHash64,
+  CRC64). The BLAS-to-geometry link therefore needs the drawable records in `levels.rpf` or a geometry-based pairing (scene bounds
+  inverse-rotated by the descriptor transform plus leaf count), which matched model AABBs and triangle counts in `shared_minigame000`.

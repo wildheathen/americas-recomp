@@ -59,6 +59,24 @@ Static imports only: calls made through GetProcAddress, COM or vtables do not sh
 
 No game files are part of this repository: the DLLs, the videos and the decoded frames stay local.
 
+## CPU rehydration tools
+
+- `rehydrate_cpu.cpp <src.bin> <vb.bin> <out.bin> [stride] [count] [format] [index.bin] [indexFormat]` calls
+  `XboxBvhBuilder.dll`'s `RehydrateRaytracingAccelerationStructureX` for one compressed BLAS. The library reads the source, the
+  vertices, the destination and the scratch buffer as **CPU pointers**, as on the console where an allocation's CPU and GPU addresses
+  are the same; the tool maps memory at each buffer's GPU virtual address and copies the data there, and its constructor gets an empty
+  shader for every pipeline through slot 62. On the synthetic fixture from `make_bvh_fixture.py` the output is identical to the CPU
+  model; on a real 103-leaf sample from `core_bvh4.rpf` the call returns `S_OK` and the output matches the model except for placeholder
+  values of leaves whose triangle is unusable with the synthetic geometry.
+- `make_bvh_fixture.py <dir>` writes that synthetic compressed BLAS (8 leaves, one Box32 level, two Box16 levels), its vertex buffer and
+  the CPU model's rehydrated output, for `BVH_REHYDRATE=<dir>` in `bvh_test` or for `rehydrate_cpu`.
+- `find_bvh_sample.py <core_bvh4.rpf> <out_dir> [count] [scan_mb]` extracts decompressed BVH data segments (zlib streams) and writes the
+  compressed BLAS starting at its 64-byte header.
+- `obj_to_geometry.py in.obj out_vb.bin out_ib.bin` converts a Wavefront mesh into the two raw buffers (float3 vertices, u32 triangles).
+- `compare_bvh_geometry.py <src.bin> <vb.bin> <ib.bin> [--dll rehydrate_cpu.exe]` runs model and library on the same input and reports the
+  byte difference, leaf bounds (non-finite, inverted, degenerate, coordinate range), validation error kinds and whether the leaf
+  primitives fit the index buffer.
+
 ## XMem trace test
 
 From an x64 Visual Studio prompt, build the stand-in with `cl /LD /O2 xmem.cpp /Fe:xmem.dll`.

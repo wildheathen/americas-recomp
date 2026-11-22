@@ -39,12 +39,12 @@ VERTEX_FORMAT_R16G16_SNORM = 37
 VERTEX_FORMAT_R8G8_UNORM = 49
 VERTEX_FORMAT_R8G8_SNORM = 51
 
-_POS_INF = float("inf")
-_NEG_INF = float("-inf")
+_POS_INF = 3.4028234663852886e38      # the library and the shaders mark empty bounds with FLT_MAX, not infinity
+_NEG_INF = -3.4028234663852886e38
 _QNAN_BITS = 0x7FC00000
 _QNAN = struct.unpack("<f", struct.pack("<I", _QNAN_BITS))[0]
-_HALF_POS_INF_BITS = 0x7C00
-_HALF_NEG_INF_BITS = 0xFC00
+_HALF_POS_INF_BITS = 0x7BFF           # half saturates to +/-65504, not to infinity
+_HALF_NEG_INF_BITS = 0xFBFF
 _MIN_NORMAL_F16 = 2.0 ** -14
 _U32_MASK = 0xFFFFFFFF
 _VERTEX_SLOT_TABLE = (2, 0, 1)
