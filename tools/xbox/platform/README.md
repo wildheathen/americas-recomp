@@ -76,6 +76,9 @@ No game files are part of this repository: the DLLs, the videos and the decoded 
 - `compare_bvh_geometry.py <src.bin> <vb.bin> <ib.bin> [--dll rehydrate_cpu.exe]` runs model and library on the same input and reports the
   byte difference, leaf bounds (non-finite, inverted, degenerate, coordinate range), validation error kinds and whether the leaf
   primitives fit the index buffer.
+- `match_bvh_models.py <bvh.bin> <models dir>... [--descriptor <instance208.bin>]` pairs a BVH with exported meshes: it rotates the BVH
+  scene bounds by the descriptor's 3x4 transform and compares them with each mesh's world AABB (size and centre, tolerance) and its
+  triangle count against `leaves * 2`, the ratio measured in the small pack where the geometry is known.
 
 ## XMem trace test
 
