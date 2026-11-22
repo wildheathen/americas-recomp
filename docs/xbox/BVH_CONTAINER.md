@@ -50,8 +50,9 @@ From `XboxBvhBuilder.dll` (`RehydrateRaytracingAccelerationStructureX` / `Rehydr
   memory at each buffer's GPU virtual address with `VirtualAlloc` and copying the data there makes the call return `S_OK`: on a synthetic
   8-leaf BLAS the output is identical to `bvh_rehydrate_cpu.py`, and on a real 103-leaf sample from `core_bvh4.rpf` (fed synthetic
   vertices and indices) it differs only in the placeholder values a leaf gets when its triangle is unusable.
-- **Empty-bound markers.** The library and the shaders use `FLT_MAX` (`0x7f7fffff`) for an empty bound and saturate half bounds to
-  `+/-65504` (`0x7bff`/`0xfbff`). The CPU model now uses the same values; its unit tests pass.
+- **Empty-bound markers and box16 overflow.** The library and the shaders use `FLT_MAX` (`0x7f7fffff`) for an empty bound. When a box
+  bound exceeds the half-float range the builder writes `+/-inf` (`0x7c00`/`0xfc00`); it does not saturate to `+/-65504`. The CPU model
+  follows the builder, and its validator accepts `+/-inf` as a valid conservative bound: only NaN fails. Its unit tests pass.
 - **`instance208` descriptors.** In the first nested pack of `core_bvh4.rpf` (10 BVHs, an interior cell) every BVH is preceded
   by a 208-byte descriptor `0x50` bytes earlier in the file. The record has a 64-bit key at `+0x40`, a 3x4 transform at `+0x50`, `0x101`
   at `+0x88`, a 64-byte-aligned offset at `+0xA0` and two `u16` counts at `+0xA4`. The key was not found, as a raw 64-bit value, in the
@@ -65,4 +66,19 @@ From `XboxBvhBuilder.dll` (`RehydrateRaytracingAccelerationStructureX` / `Rehydr
   the library returns `S_OK`, every leaf bound is finite and ordered, the model and the library differ in 44 of 11,328 bytes, and 21 box
   enclosure warnings remain because the transformed y extent (+/-72,536) exceeds the half-float box16 range (+/-65,504). Both tools
   accept an arbitrary number of geometry descriptors (repeatable `--geom`): a six-geometry BLAS rehydrated with one repeated mesh returns
-  `S_OK` and differs from the model in 36 of 199,744 bytes; assigning a mesh to each geometry index is still open.
+  `S_OK` and differs from the model in 36 of 199,744 bytes. The mesh per geometry index comes from the drawable's geometry list
+  (see `BVH_REHYDRATE_PLAN.md`, milestones 2-7).
+- **Quantized-8 vertex positions (RAGE9 vertex format 16).** The vertex block keeps each attribute in its own stream. A 32-byte header
+  (3 `f32` origin, a `u32` axis word, 3 `f32` scale, 4 bytes) sits right before the position offset (128). The positions are one
+  contiguous run of 8-byte records (x 24 bits, y 24 bits, z 16 bits, slot order chosen by the axis word); the other attributes follow.
+  `(vb_len - position offset) / vertex count` (20 to 44 bytes seen) is the bytes per vertex over all streams, not a position stride.
+- **Instance transform.** The BLAS is built from the geometry in the frame of its 208-byte instance descriptor: the 3x4 at `+0x50`,
+  row major, applied as `x' = M * x` (the same matrix `match_bvh_models.py` uses for the bounds). The samples carry the identity or an
+  axis-aligned 90-degree rotation; the transposed matrix does not fit. Without it most leaves of the rotated samples fall outside the
+  BLAS header bounds.
+- **Geometry checks independent of the library.** A byte-identical library result does not verify geometry: the model and the library
+  agree on any input. `bvh_rehydrate_cpu.stored_geometry_checks` compares a rehydrated BLAS with what the compressed source recorded:
+  leaves inside the header AABB mapped through the leaf transform; the leaf union equal to that AABB (error 0 to 2e-7 on correct
+  geometry, 5.7e-4 to 0.5 on the wrong decode); the stored per-component box overrides inside the slot's leaf range and no looser than
+  it; and the internal box surface area as a tie-break. With the fixed decoder all three verified samples pass, and the library still
+  returns `S_OK` with 0 differing bytes.

@@ -1170,6 +1170,114 @@ def validate_rehydrated_bvh(
     )
 
 
+def iter_box_overrides(src: bytes, header: Optional[BvhHeader] = None):
+    """Yield (child_id, component, value) for every per-component override stored in the compressed box groups.
+
+    component 0-2 is the min x/y/z and 3-5 the max x/y/z of the child slot; box16 values are returned as floats.
+    """
+    hdr = header or parse_bvh_header(src)
+    if hdr.root_node_type not in (NODE_TYPE_BOX16, NODE_TYPE_BOX32):
+        return
+    for lv in parse_level_table(src, hdr):
+        for is_box32, start, num in ((True, lv.box32_start, lv.num_box32), (False, lv.box16_start, lv.num_box16)):
+            for g in range((num + 63) // 64):
+                active = min(64, num - g * 64)
+                base = hdr.offset_to_hierarchy + start + (g << (13 if is_box32 else 12))
+                hwords = struct.unpack_from(f"<{active}I", src, base)
+                counts = [w >> 24 for w in hwords]
+                total_children = sum(counts)
+                child_prefix = ov_prefix = 0
+                for tid in range(active):
+                    cnt, mask = counts[tid], hwords[tid] & 0x00FFFFFF
+                    cids = struct.unpack_from(f"<{cnt}I", src, base + ((active + child_prefix) << 2)) if cnt else ()
+                    child_prefix += cnt
+                    k = bin(mask).count("1")
+                    if is_box32:
+                        ovs = struct.unpack_from(f"<{k}f", src, base + ((active + total_children + ov_prefix) << 2)) if k else ()
+                    else:
+                        raw = struct.unpack_from(f"<{k}H", src, base + ((active + total_children) << 2) + (ov_prefix << 1)) if k else ()
+                        ovs = tuple(_f16_bits_to_f32(h) for h in raw)
+                    ov_prefix += k
+                    oi = 0
+                    for bit in range(24):
+                        if mask >> bit & 1:
+                            slot, comp = divmod(bit, 6)
+                            if slot < cnt:
+                                yield cids[slot], comp, ovs[oi]
+                            oi += 1
+
+
+@dataclass(frozen=True)
+class GeometryChecks:
+    """How well rehydrated leaves agree with what the compressed BLAS recorded from the geometry it was built on.
+
+    A byte-identical library result does not check the geometry (the model and the library agree on any input); these do.
+    """
+
+    leaves: int
+    leaves_outside_header: int      # leaves outside the header AABB mapped through the leaf transform
+    header_bounds_error: float      # max |leaf union - header AABB| over the largest header extent; 0 for the true geometry
+    overrides_consistent: int       # stored override components inside the slot's leaf range and no looser than it
+    overrides_inconsistent: int
+    internal_box_area: float        # surface area summed over every internal box slot; lower means a tighter fit
+
+    @property
+    def consistent(self) -> bool:
+        return self.leaves_outside_header == 0 and self.header_bounds_error <= 1e-4 and self.overrides_inconsistent == 0
+
+
+def stored_geometry_checks(src: bytes, dst: bytes, outside_rtol: float = 1e-3) -> GeometryChecks:
+    """Compare a rehydrated BLAS (`dst`) with the bounds and box overrides stored in its compressed source (`src`)."""
+    hdr = parse_bvh_header(src)
+    tp = decode_leaf_transform(hdr)
+    corners = [(x, y, z) for x in (hdr.aabb_min[0], hdr.aabb_max[0]) for y in (hdr.aabb_min[1], hdr.aabb_max[1])
+               for z in (hdr.aabb_min[2], hdr.aabb_max[2])]
+    if tp.enabled:
+        corners = [_apply_leaf_transform(c, tp) for c in corners]
+    exp = [min(c[k] for c in corners) for k in range(3)] + [max(c[k] for c in corners) for k in range(3)]
+    span = max(max(exp[k + 3] - exp[k] for k in range(3)), 1e-30)
+
+    union = [math.inf] * 3 + [-math.inf] * 3
+    outside = 0
+    for i in range(hdr.num_leaves):
+        off = hdr.offset_to_leaves + ((i // 2048) << 17) + ((i % 2048) << 6)
+        b = _child_aabb_from_dst(dst, ((off >> 6) << 3) | NODE_TYPE_TRI0)
+        if max([exp[k] - b[k] for k in range(3)] + [b[k] - exp[k] for k in range(3, 6)]) > outside_rtol * span:
+            outside += 1
+        for k in range(3):
+            union[k] = min(union[k], b[k])
+            union[k + 3] = max(union[k + 3], b[k + 3])
+    bounds_error = max(abs(union[k] - exp[k]) for k in range(6)) / span if hdr.num_leaves else 0.0
+
+    good = bad = 0
+    for cid, comp, value in iter_box_overrides(src, hdr):
+        b = _child_aabb_from_dst(dst, cid)
+        lo, hi = b[comp % 3], b[comp % 3 + 3]
+        tighter = value >= b[comp] if comp < 3 else value <= b[comp]
+        if tighter and lo <= value <= hi:
+            good += 1
+        else:
+            bad += 1
+
+    area = 0.0
+    seen = set()
+    stack = [hdr.root_node_id]
+    while stack:
+        nid = stack.pop()
+        if nid == INVALID_NODE or nid in seen or (nid & 7) not in (NODE_TYPE_BOX16, NODE_TYPE_BOX32):
+            continue
+        seen.add(nid)
+        noff = (nid >> 3) << 6
+        for cid in struct.unpack_from("<4I", dst, noff):
+            if cid == INVALID_NODE:
+                continue
+            b = _child_aabb_from_dst(dst, cid)
+            e = [b[k + 3] - b[k] if math.isfinite(b[k + 3] - b[k]) and b[k + 3] >= b[k] else 0.0 for k in range(3)]
+            area += 2.0 * (e[0] * e[1] + e[1] * e[2] + e[0] * e[2])
+            stack.append(cid)
+    return GeometryChecks(hdr.num_leaves, outside, bounds_error, good, bad, area)
+
+
 @dataclass(frozen=True)
 class TriangleHit:
     t: float

@@ -84,7 +84,7 @@ class W:
                 flags = self.u32(fvf + 0x138)
                 desc = self.S(g + 64, 16)
                 ib = self.S(desc, 64)
-                out.append({"index": gi, "vertices": flags >> 10, "triangles": self.u16(desc + 10),
+                out.append({"index": gi, "model": mi, "vertices": flags >> 10, "triangles": self.u16(desc + 10),
                             "clusters": self.u16(desc + 8),
                             "vb": self.u64(vb + 24) - BASE_GFX, "vb_len": self.u32(vb + 8) * self.u16(vb + 12),
                             "pos_off": self.u32(fvf), "pos_size": self.s[fvf + 0xD0],

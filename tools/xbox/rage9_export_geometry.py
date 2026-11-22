@@ -45,7 +45,8 @@ def decode_positions(vb, positions, count, stride, fmt, transform=None):
 
 
 def read_instance_transform(path):
-    m = struct.unpack_from("<12f", open(path, "rb").read(), INSTANCE_TRANSFORM_OFFSET)
+    with open(path, "rb") as f:
+        m = struct.unpack_from("<12f", f.read(), INSTANCE_TRANSFORM_OFFSET)
     return tuple(tuple(m[r * 4:r * 4 + 4]) for r in range(3))
 
 

@@ -60,6 +60,9 @@ def main():
         specs = [[a.vb, a.ib, str(a.stride), str(a.vertex_count), str(a.vertex_format), str(a.index_format)]]
     else:
         ap.error("give vb/ib or at least one --geom")
+    # the library runs from its own directory, so every path it receives must be absolute
+    a.src = os.path.abspath(a.src)
+    specs = [[os.path.abspath(s[0]), s[1] if s[1] == "-" else os.path.abspath(s[1])] + list(s[2:]) for s in specs]
 
     src = open(a.src, "rb").read()
     header = bvh.parse_bvh_header(src)

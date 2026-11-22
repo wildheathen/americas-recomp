@@ -574,6 +574,72 @@ class TestEndToEndBoxRehydration(unittest.TestCase):
         self.assertTrue(any("NaN AABB" in e for e in rep.errors), rep.errors)
 
 
+class TestStoredGeometryChecks(unittest.TestCase):
+    """The checks compare rehydrated leaves with what the compressed BLAS recorded from the geometry it was built on."""
+
+    def _blas(self, aabb_max=(3.0, 1.0, 0.0), overrides=None):
+        leaf_off, hier_off, total = 0x100, 0x180, 0x200
+        src = bytearray(total)
+        b32_id = ((hier_off >> 6) << 3) | bvh.NODE_TYPE_BOX32
+        src[:64] = _make_bvh_header(
+            flags=bvh.BVH_FLAG_BLAS | bvh.BVH_FLAG_COMPRESSED, total_bytes=total, num_leaves=2,
+            aabb_min=(0.0, 0.0, 0.0), aabb_max=aabb_max, offset_to_hierarchy=hier_off, root_node_id=b32_id,
+            offset_to_leaves=leaf_off, offset_to_parent_data=0x40,
+        )
+        chunk = _pack_compressed_leaf_chunk([(0, 0x01, 0, bvh.INVALID_NODE, 0x09), (0, 0x01, 1, bvh.INVALID_NODE, 0x09)])
+        src[leaf_off:leaf_off + len(chunk)] = chunk
+        leaf_ids = [((leaf_off + i * 64) >> 6) << 3 | bvh.NODE_TYPE_TRI0 for i in range(2)]
+        grp = _pack_box_group([(leaf_ids, overrides or {})], is_box32=True)
+        src[hier_off:hier_off + len(grp)] = grp
+        table = struct.pack("<3I", 128, 128, 1)
+        src[total - len(table):total] = table
+        return bytes(src)
+
+    def _rehydrate(self, src, dx=0.0):
+        tris = [((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), ((2.0, 0.0, 0.0), (3.0, 0.0, 0.0), (2.0, 1.0, 0.0))]
+        vb = b"".join(struct.pack("<3f", p[0] + dx, p[1], p[2]) for t in tris for p in t)
+        return bytes(bvh.rehydrate_bvh(src, geometries=[bvh.TriangleGeometryDesc(vertex_buffer=vb, vertex_stride=12)]))
+
+    def test_true_geometry_matches_the_header_bounds(self):
+        src = self._blas()
+        chk = bvh.stored_geometry_checks(src, self._rehydrate(src))
+        self.assertEqual(chk.leaves_outside_header, 0)
+        self.assertEqual(chk.header_bounds_error, 0.0)
+        self.assertTrue(chk.consistent)
+
+    def test_shifted_geometry_leaves_the_header_bounds(self):
+        src = self._blas()
+        chk = bvh.stored_geometry_checks(src, self._rehydrate(src, dx=1.0))
+        self.assertEqual(chk.leaves_outside_header, 1)
+        self.assertAlmostEqual(chk.header_bounds_error, 1.0 / 3.0, places=6)
+        self.assertFalse(chk.consistent)
+
+    def test_smaller_geometry_inside_the_header_still_fails_the_bounds_match(self):
+        src = self._blas(aabb_max=(4.0, 1.0, 0.0))
+        chk = bvh.stored_geometry_checks(src, self._rehydrate(src))
+        self.assertEqual(chk.leaves_outside_header, 0)
+        self.assertGreater(chk.header_bounds_error, 0.2)
+        self.assertFalse(chk.consistent)
+
+    def test_overrides_tighter_than_the_leaves_are_consistent(self):
+        # slot 1 (second leaf, x 2..3): a tighter min x 2.5 is what a spatial split leaves behind
+        src = self._blas(overrides={6: 2.5})
+        chk = bvh.stored_geometry_checks(src, self._rehydrate(src))
+        self.assertEqual((chk.overrides_consistent, chk.overrides_inconsistent), (1, 0))
+        self.assertTrue(chk.consistent)
+
+    def test_override_outside_the_leaf_range_is_inconsistent(self):
+        src = self._blas(overrides={6: 3.5})
+        chk = bvh.stored_geometry_checks(src, self._rehydrate(src))
+        self.assertEqual((chk.overrides_consistent, chk.overrides_inconsistent), (0, 1))
+        self.assertFalse(chk.consistent)
+
+    def test_box_area_is_reported(self):
+        src = self._blas()
+        chk = bvh.stored_geometry_checks(src, self._rehydrate(src))
+        self.assertGreater(chk.internal_box_area, 0.0)
+
+
 class TestBvhTraversal(unittest.TestCase):
     def test_nearest_hit_miss_and_interval(self):
         for box_type, fmt in ((bvh.NODE_TYPE_BOX16, "<6e"), (bvh.NODE_TYPE_BOX32, "<6f")):

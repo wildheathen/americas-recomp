@@ -152,12 +152,12 @@ rehydration difference still 0 when the predicted mapping is used.
 `bvh_02` infinite bounds and the `bvh_08` inverted boxes were decoder errors (separate position stream, instance transform); with the
 fixes all three verified samples validate cleanly with zero tolerance. See plan milestone 7.
 
-### 5.4 Replace `assign_bvh_geometry.py`
+### 5.4 Replace `assign_bvh_geometry.py` (done)
 
-It still documents the dead end ("not decidable from the BLAS"). Rewrite it around the drawable mapping: given a BLAS, a window and a
-drawable, print one row per `geom_index` (geometry record offset, vertices, triangles, stride, position offset) and the
-`rehydrate_cpu --geom` command. Acceptance: the rehydration difference stays 0 and the tool no longer claims the mapping is
-impossible.
+Removed. `rage9_score_blas.py` finds the candidate drawables of a BLAS (ordered-subsequence match of the triangle counts), decodes
+each candidate from its graphics page run with the instance transform, rehydrates it and accepts it only if
+`stored_geometry_checks` is consistent; `--write` emits the buffers and `export.json` for `compare_bvh_geometry.py`. On `bvh_08` it
+finds the single candidate, the 6 geometries in order and the same 2-page run, with every check consistent.
 
 ### 5.5 Documentation fixes
 

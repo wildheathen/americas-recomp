@@ -52,7 +52,9 @@ Steps:
    signal is degenerate, because the leaves of an index are produced from the mesh placed on it, so every candidate matches its own
    bounds. Triangle counts only narrow the candidates (1-2 triangles per leaf). The per-index mapping needs the game's geometry
    descriptor array; the BLAS records only the index. Widening the candidate set from 13 to 1,228 meshes changed nothing, which
-   confirms the limit.
+   confirms the limit. **Superseded:** the drawable's geometry list gives the mapping (milestones 2-6), and the score compares the
+   rehydrated leaves with what the BLAS stored (header bounds, box overrides; milestone 7) rather than with the mesh placed on the
+   index, which is what made the old signal degenerate. `assign_bvh_geometry.py` is removed; `rage9_score_blas.py` replaces it.
 5. Re-verify every BVH of the cell; record counts only (matches, byte differences, enclosure warnings). [one-geometry BLAS verified;
    multi-geometry BLAS verified end to end with the real drawable geometry: 0/199,744 byte difference]
 
