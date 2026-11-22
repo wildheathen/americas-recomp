@@ -21,10 +21,15 @@ class TestEmbeddings(unittest.TestCase):
 
 
 class TestShaderRule(unittest.TestCase):
-    def test_non_rt_shaders_are_left_out(self):
-        hashes = [0x11111111, 0xAAAA0001, 0x22222222, 0xBBBB0002, None]
-        model = [{"shader_hash": h} for h in hashes]
-        self.assertEqual(sb.rule_used(model), [0, 2, 4])
+    def test_listed_shaders_are_left_out(self):
+        skip = sb.parse_shader_hashes("0xAAAA0001, bbbb0002")
+        self.assertEqual(skip, frozenset({0xAAAA0001, 0xBBBB0002}))
+        model = [{"shader_hash": h} for h in (0x11111111, 0xAAAA0001, 0x22222222, 0xBBBB0002, None)]
+        self.assertEqual(sb.rule_used(model, skip), [0, 2, 4])
+
+    def test_no_hashes_means_no_rule(self):
+        self.assertEqual(sb.parse_shader_hashes(""), frozenset())
+        self.assertEqual(sb.parse_shader_hashes(None), frozenset())
 
 
 if __name__ == "__main__":

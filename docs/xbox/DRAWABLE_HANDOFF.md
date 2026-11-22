@@ -124,7 +124,9 @@ skip one geometry in the middle (index 8, 2 triangles; index 6, 88 triangles).
 
 **The set is decided by the shader** (plan milestone 9): a geometry is left out exactly when its shader name hash (first word of the
 shader record; shader group at drawable `+0x10`, pointers at group `+0x10`, count at group `+0x18`, shader index per geometry in the
-model's `+0x20` u16 array) is hash A or hash B. It predicts the used set on all 8 identified BLAS (48 geometries).
+model's `+0x20` u16 array) is one of two values. It predicts the used set on all 8 identified BLAS (48 geometries). The values are game
+data and stay out of the repository: recover them locally from any identified BLAS that skips a geometry, and pass them to
+`rage9_score_blas.py --skip-shaders` or `RAGE9_SKIP_SHADERS`.
 
 Still open: what those two shaders are (alpha-blended, decal or "no ray tracing" materials are the obvious guesses; the shader record
 holds more words that may carry a flag the engine actually tests), and whether the same drawable ever appears in two BLAS with

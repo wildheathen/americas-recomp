@@ -188,11 +188,13 @@ Milestone 9, done: **which geometries the BLAS keeps.** It is not a prefix rule 
 skipped geometries, `+48` hash-like), the index descriptor, the vertex-format flags or the presence of the data in the pages. It is the
 geometry's shader: the drawable's shader group is at `+0x10`, with a pointer array at group `+0x10` and a u16 count at group `+0x18`;
 the model's u16 array at `+0x20` gives each geometry's shader index (the identity on every model seen); the shader's first word is a
-name hash. **A geometry is left out of the BLAS exactly when its shader hash is hash A or hash B.** On the 8 identified
-BLAS (48 geometries, 8 distinct shader hashes: 6 kept, 2 left out) the rule predicts the used set every time, including `bvh_02` (3 of 7: the 4 skipped
-ones carry those two hashes) and `bvh_07` (8 of the 9 skipped carry hash A, one hash B). The shader names are not needed and
-not recorded. `rage9_dump_cell.py` reads the hash per geometry and `rage9_score_blas.py` reports, per candidate, whether its used set is
-the predicted one.
+name hash. **A geometry is left out of the BLAS exactly when its shader is one of two shaders.** On the 8 identified BLAS (48
+geometries, 8 distinct shader hashes: 6 kept, 2 left out) the rule predicts the used set every time, including `bvh_02` (3 of 7: the 4
+skipped ones carry the two hashes) and `bvh_07` (the 9 skipped carry them too, 8 one and 1 the other). The two hash values are game
+data and are not recorded here; anyone with the package recovers them by comparing the shader hashes of the used and skipped geometries
+of any identified BLAS that skips one. The shader names are not needed either. `rage9_dump_cell.py` reads the hash per geometry, and
+`rage9_score_blas.py --skip-shaders <hex,hex>` (or `RAGE9_SKIP_SHADERS`) reports, per candidate, whether its used set is the predicted
+one.
 
 ## Open questions
 

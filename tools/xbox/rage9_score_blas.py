@@ -8,13 +8,14 @@ For one BLAS this:
      geometries (separate quantized-8 position stream, meshlet triangles), applies the BLAS's instance transform, rehydrates with the
      CPU model and scores the result with bvh_rehydrate_cpu.stored_geometry_checks: leaves inside the header bounds, leaf union equal
      to the header bounds, stored box overrides consistent, and the internal box area as the tie-break.
---unordered also tries the geometries in any order, not only as an ordered subsequence. Each scored candidate also says whether its
-used set is the one the shader rule predicts (geometries whose shader name hash is in NON_RT_SHADER_HASHES are left out).
+--unordered also tries the geometries in any order, not only as an ordered subsequence. With --skip-shaders (or RAGE9_SKIP_SHADERS) each
+scored candidate also says whether its used set is the one the shader rule predicts (geometries whose shader name hash is listed are
+left out; the hashes are game data and are not in the repository).
 A candidate is accepted only if the checks are consistent. Prints counts and stream offsets; drawable names only with --names, and
 they stay local. With --write <dir> the best candidate's float3/uint32 buffers and export.json are written for
 compare_bvh_geometry.py.
 
-usage: python -I rage9_score_blas.py <window.rpf> <blas.bin> <instance208.bin> [--runs N] [--embeddings N] [--unordered] [--names] [--write DIR]
+usage: python -I rage9_score_blas.py <window.rpf> <blas.bin> <instance208.bin> [--runs N] [--embeddings N] [--unordered] [--skip-shaders HEX,HEX] [--names] [--write DIR]
 """
 import collections
 import json
@@ -28,15 +29,22 @@ from rage9_dump_cell import BASE_SYS, MAGIC, W, streams
 from rage9_export_geometry import decode_positions, decode_triangles, read_instance_transform
 
 MAX_RUN_PAGES = 64
-# Shaders whose geometries the BLAS leaves out (measured on 8 BLAS, 48 geometries: every skipped geometry has one of these, no used
-# one does). The rule predicts the used set; the scorer reports whether each candidate agrees.
-NON_RT_SHADER_HASHES = frozenset({0xAAAA0001, 0xBBBB0002})   # placeholders: the real values are game data, kept out
-
-
-def rule_used(model_geos):
-    """Indices of the model's geometries the selection rule keeps in the BLAS."""
-    return [k for k, g in enumerate(model_geos) if g.get("shader_hash") not in NON_RT_SHADER_HASHES]
 NEAR_PAGES = 48
+# The BLAS leaves out the geometries of two shaders (measured on 8 BLAS, 48 geometries: every skipped geometry has one of them, no
+# used one does). Their name hashes are game data and stay out of the repository: pass them with --skip-shaders or this variable
+# (hex, comma-separated). To recover them, compare the shader_hash of the used and the skipped geometries of any identified BLAS
+# that skips one (rage9_dump_cell.W.geos reports shader_hash per geometry).
+SKIP_SHADERS_ENV = "RAGE9_SKIP_SHADERS"
+
+
+def parse_shader_hashes(text):
+    """'0x1234abcd,89abcdef' -> frozenset of ints; empty or None -> empty set (the rule is then not applied)."""
+    return frozenset(int(x, 16) for x in (text or "").replace(" ", "").split(",") if x)
+
+
+def rule_used(model_geos, skip):
+    """Indices of the model's geometries the selection rule keeps in the BLAS: those whose shader hash is not in `skip`."""
+    return [k for k, g in enumerate(model_geos) if g.get("shader_hash") not in skip]
 
 
 def leaf_signature(src):
@@ -69,7 +77,7 @@ def embeddings(sig, counts, cap, ordered=True):
     return out
 
 
-def scan(window, sig, cap, ordered=True):
+def scan(window, sig, cap, ordered=True, skip=frozenset()):
     """Return (pages, candidates). pages: [(file offset, raw)] of graphics pages in stored order; candidates: dicts."""
     pages, cands, seen = [], [], set()
     for off, raw in streams(window):
@@ -102,10 +110,10 @@ def scan(window, sig, cap, ordered=True):
                 if key in seen:
                     continue
                 seen.add(key)
-                predicted = rule_used(model)
+                predicted = rule_used(model, skip) if skip else None
                 for used in embeddings(sig, counts, cap, ordered):
                     cands.append({"stream": off, "name": name, "model": mi, "counts": counts, "used": used,
-                                  "geos": [model[k] for k in used], "rule_agrees": used == predicted})
+                                  "geos": [model[k] for k in used], "rule_agrees": None if predicted is None else used == predicted})
     pages.sort(key=lambda x: x[0])
     return pages, cands
 
@@ -187,21 +195,22 @@ def score(src, built):
 
 
 def main(argv):
-    opts = {"--runs": 6, "--embeddings": 64, "--write": None}
+    opts = {"--runs": 6, "--embeddings": 64, "--write": None, "--skip-shaders": os.environ.get(SKIP_SHADERS_ENV, "")}
     names = "--names" in argv
     ordered = "--unordered" not in argv
     argv = [a for a in argv if a not in ("--names", "--unordered")]
     for k in list(opts):
         if k in argv:
             i = argv.index(k)
-            opts[k] = argv[i + 1] if k == "--write" else int(argv[i + 1])
+            opts[k] = argv[i + 1] if k in ("--write", "--skip-shaders") else int(argv[i + 1])
             argv = argv[:i] + argv[i + 2:]
     window, blas_path, desc_path = argv[:3]
     src = open(blas_path, "rb").read()
     transform = read_instance_transform(desc_path)
     sig = leaf_signature(src)
     print("%s: %d leaves, triangles per geometry index %s" % (os.path.basename(blas_path), bvh.parse_bvh_header(src).num_leaves, sig))
-    pages, cands = scan(window, sig, opts["--embeddings"], ordered)
+    skip = parse_shader_hashes(opts["--skip-shaders"])
+    pages, cands = scan(window, sig, opts["--embeddings"], ordered, skip)
     print("streams %d, candidate (drawable, model, embedding) %d" % (len(pages), len(cands)))
     results = []
     for c in cands:
@@ -225,7 +234,7 @@ def main(argv):
         print("   %s%-10s stream 0x%-8x m%d used %-24s run 0x%x+%d | outside %d bounds %.1e overrides %d/%d area x%s" % (
             label, "CONSISTENT" if not bad else "rejected", c["stream"], c["model"], c["used"], pages[run.start][0], run.n,
             chk.leaves_outside_header, chk.header_bounds_error, chk.overrides_consistent, chk.overrides_inconsistent, ratio)
-              + (" | shader rule agrees" if c["rule_agrees"] else " | shader rule differs"))
+              + {True: " | shader rule agrees", False: " | shader rule differs", None: ""}[c["rule_agrees"]])
     accepted = [r for r in results if not r[0]]
     print("accepted %d of %d scored" % (len(accepted), len(results)))
     if opts["--write"] and results:
