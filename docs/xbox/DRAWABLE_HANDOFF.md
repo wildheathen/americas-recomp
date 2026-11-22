@@ -137,10 +137,10 @@ rehydration difference still 0 when the predicted mapping is used.
 
 `bvh_01`, `bvh_03`, `bvh_04`, `bvh_07` and `bvh_09` are identified and verified (plan milestone 8). Left:
 
-- `bvh_05` and `bvh_06`: no single drawable anywhere in `levels.rpf` (all 71 GB searched; plan milestone 8). The leaves use every
-  primitive index of each geometry, so no triangles were dropped. Next: test whether they combine several drawables (score
-  per-geometry-index against single geometries, using the header bounds and overrides of that index's leaves), or look in the other
-  archives of the package.
+- `bvh_05` and `bvh_06`: aggregates of geometries from several drawables (plan milestone 8). A leaf-pair test (paired primitives
+  must share an edge in the true index buffer) finds three exact pieces in GB 64-65; the rest of their indices have no exact piece in
+  `levels.rpf`. Each piece needs its own placement transform, which the BLAS does not store. Next: find the placement data (the map's
+  entity transforms) for those drawables, or look in the other archives of the package for the missing pieces.
 
 ### 5.3 Bound-box checks and the validator (done)
 

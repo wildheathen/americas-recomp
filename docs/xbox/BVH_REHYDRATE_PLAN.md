@@ -161,6 +161,16 @@ the 250 drawables that hold a 152- and an 84-triangle geometry keeps exactly tho
 drawables or from geometry outside `levels.rpf`; the drawable enumeration relies on the name pointer at `+168`, which is the other
 limit of the search.
 
+**They are aggregates.** A position-free test settles it: a paired leaf holds two primitives the builder joined across a shared edge,
+so in the true index buffer the two triangles share two vertex indices. On `bvh_08` the true geometry scores 1.00 for every index and
+the other geometries 0.3-0.6. Scoring every geometry of `levels.rpf` with the right triangle count and a kept shader (16,180 in all)
+against each BLAS index with at least 30 pairs finds three exact pieces, each geometry of a different drawable, all in GB 64-65: `bvh_05`
+index 0 (152 triangles, 60 pairs), `bvh_06` index 1 (1,656 triangles, 753 pairs) and `bvh_06` index 10 (412 triangles, 190 pairs).
+`bvh_05` index 1 (84 triangles, 38 pairs) and 25 of the 27 tested `bvh_06` indices have no exact piece; eight more candidates score
+0.90-0.95, which is the level of similar meshes, not a match. With only the instance transform, each piece lands small and near the
+origin of the BLAS frame, so the aggregate places each piece with its own transform, which the BLAS does not store; the positions
+cannot be checked without the placement data. One piece reads shader hash 0 (its drawable's shader group did not resolve).
+
 What it took beyond milestone 7:
 
 - *Graphics pages are not all tagged.* A segment is the concatenation of streams in stored order, but a page can start with an index
