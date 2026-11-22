@@ -23,6 +23,29 @@ using Microsoft::WRL::ComPtr;
 #include "bvh_dummy_cs.h"      // g_dummy: an empty compute shader, used in place of a blob the PC compiler cannot take
 static int g_pipe = 0, g_crashed = 0, g_failed = 0;
 static const char* g_dump = nullptr;     // BVH_DUMP_DIR: write every shader blob handed to the device
+
+// Root signature for the lowered replacements: the address lowering needs CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED, which the builder's own
+// signatures (from the containers' RTS0) do not carry. Ranges 0..15 of every kind are enough: unused ranges are legal, and the shaders
+// only reference their own registers, which are below 16.
+static ComPtr<ID3D12RootSignature> g_heapSig;
+static ID3D12RootSignature* HeapSignature(ID3D12Device* dev) {
+    if (g_heapSig) return g_heapSig.Get();
+    D3D12_DESCRIPTOR_RANGE r[3] = {};
+    r[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 16, 0, 0, 0};
+    r[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 16, 0, 0, 0};
+    r[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 16, 0, 0, 0};
+    D3D12_ROOT_PARAMETER p = {};
+    p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    p.DescriptorTable = {3, r};
+    p.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC rs = {1, &p, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED};
+    ComPtr<ID3DBlob> sb, eb;
+    HRESULT hr = D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sb, &eb);
+    if (FAILED(hr)) { printf("  [heap root signature] serialize failed 0x%08lx\n", (unsigned long)hr); return nullptr; }
+    hr = dev->CreateRootSignature(0, sb->GetBufferPointer(), sb->GetBufferSize(), IID_PPV_ARGS(&g_heapSig));
+    if (FAILED(hr)) { printf("  [heap root signature] create failed 0x%08lx\n", (unsigned long)hr); g_heapSig.Reset(); return nullptr; }
+    return g_heapSig.Get();
+}
 static HRESULT TryCreate(ID3D12Device* dev, const D3D12_COMPUTE_PIPELINE_STATE_DESC* d, REFIID riid, void** out, bool* crashed) {
     __try { *crashed = false; return dev->CreateComputePipelineState(d, riid, out); }
     __except (EXCEPTION_EXECUTE_HANDLER) { *crashed = true; return E_FAIL; }
@@ -49,7 +72,8 @@ static HRESULT __fastcall Slot62(XboxObjectProxy* self, const D3D12_COMPUTE_PIPE
             fseek(rf, 0, SEEK_END); long n = ftell(rf); fseek(rf, 0, SEEK_SET);
             replBytes.resize(n); fread(replBytes.data(), 1, n, rf); fclose(rf);
             dr.CS.pShaderBytecode = replBytes.data(); dr.CS.BytecodeLength = n;
-            printf("  [slot 62] #%02d: using replacement %s (%ld bytes)\n", idx, path, n);
+            if (ID3D12RootSignature* hs = HeapSignature((ID3D12Device*)self->real)) dr.pRootSignature = hs;
+            printf("  [slot 62] #%02d: using replacement %s (%ld bytes, heap-indexed root signature)\n", idx, path, n);
         }
     }
     desc = &dr;

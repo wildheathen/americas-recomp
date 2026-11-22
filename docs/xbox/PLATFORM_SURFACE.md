@@ -104,6 +104,15 @@ blobs now lower, assemble and sign; `addr_kernel.ll` + `addrmap_test.cpp` (run b
 RTX 5080 and on WARP with 0 mismatches. Still needed to dispatch the real shaders: build the table and descriptor heap from the resources the builder
 creates, and create the pipeline with a root signature that carries `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` (the builder's own signatures do not).
 Raw buffers are limited to 4 GiB per view.
+**PSO creation with the lowered blobs (`bvh_test.cpp`)**: for a replacement shader, `Slot62` swaps the builder's own root signature for one
+with a descriptor table of `t0..t15`/`u0..u15`/`b0..b15` and `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`, which the signatures built from `RTS0`
+cannot carry (unused ranges are legal, and every shader's registers are below 16). With `BVH_REPLACE_DIR` and the 52 lowered blobs the
+constructor requests 53 pipelines with **0 compiler crashes and 0 other failures** on the RTX 5080 when the wave size is left unpinned;
+with the correct 64-lane pinning the 21 shaders that use wave operations are rejected only for the wave size, since that adapter reports
+32-lane waves. Nothing was dispatched: the build call still needs the proxy's descriptor heap, the table and real inputs.
+Prior art for that part: Xbox2Windows (`src/title_va_lookup.hlsli`, `era_title_va.cpp`) implements the same sorted-range lookup, with
+alignment and whole-access checks, and makes the title's pointers valid GPU addresses with `OpenExistingHeapFromAddress` instead of
+copying, so the game's existing 64-bit addresses need no rewriting. Worth adopting when the proxy builds the heap.
 
 **`TypedLoad.i32` and LeafRehydration (blob 48) on NVIDIA**: blob 48 is the only `TypedLoad.i32` user, with two calls
 `TypedLoad.i32(i32 138, handle u0 = compressedBVH (RWByteAddressBuffer), i32 offset, i32 65)`; only component 0 of the `ResRet.i32` is used.
