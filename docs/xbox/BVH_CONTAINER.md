@@ -57,5 +57,11 @@ From `XboxBvhBuilder.dll` (`RehydrateRaytracingAccelerationStructureX` / `Rehydr
   at `+0x88`, a 64-byte-aligned offset at `+0xA0` and two `u16` counts at `+0xA4`. The key was not found, as a raw 64-bit value, in the
   model resources of `core_restofworld.rpf` (926) or `shared_minigame000.rpf` (926), nor inside the inflated streams of `packs.rpf`
   (143,313 streams) or `core_restofworld.rpf` (2,360 streams); it is also not a simple name hash (joaat, FNV-1a, Murmur64A, xxHash64,
-  CRC64). The BLAS-to-geometry link therefore needs the drawable records in `levels.rpf` or a geometry-based pairing (scene bounds
-  inverse-rotated by the descriptor transform plus leaf count), which matched model AABBs and triangle counts in `shared_minigame000`.
+  CRC64).
+- **Pairing by bounds instead of by key.** `tools/xbox/match_bvh_models.py` rotates the BVH scene bounds by the descriptor transform and
+  compares them with each mesh's world AABB and its triangle count against `leaves * 2`. On that cell the geometry lives in a 3 GB window
+  of `levels.rpf` (found with a name filter; the archive has no readable name table): 13 meshes pair with the 10 BVHs, 7 of them with an
+  exact AABB and a triangle ratio of 0.85-1.01. One of those, a single-geometry BLAS with 103 leaves, was rehydrated with its real mesh:
+  the library returns `S_OK`, every leaf bound is finite and ordered, the model and the library differ in 44 of 11,328 bytes, and 21 box
+  enclosure warnings remain because the transformed y extent (+/-72,536) exceeds the half-float box16 range (+/-65,504). Other BVHs in
+  the cell reference more than one geometry index, which `rehydrate_cpu` does not yet accept.
