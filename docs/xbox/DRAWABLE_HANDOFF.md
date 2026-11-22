@@ -116,22 +116,19 @@ names of the candidates locally. **Do not put those names, buffers or reports in
 
 ## 5. Open work
 
-### 5.1 The selection rule (highest value)
+### 5.1 The selection rule (done)
 
 The leaf `geom_index` is the position in the drawable's geometry list **of the geometries the BVH actually uses**. The mappings are confirmed by
 geometry (plan milestone 8): `bvh_00`, `bvh_02` and `bvh_08` use a prefix, `bvh_07` the last three of twelve, `bvh_01` and `bvh_03`
-skip one geometry in the middle (index 8, 2 triangles; index 6, 88 triangles). What decides the set is still unknown.
+skip one geometry in the middle (index 8, 2 triangles; index 6, 88 triangles).
 
-Ruled out (same values for used and skipped geometries on four drawables): the 160-byte geometry record (`+88`, `+92`, `+96` constant;
-`+48` hash-like), the index descriptor, the vertex-format flags, the model `+0x20` u16 array (the identity everywhere), and the
-presence of the data in the graphics pages (the skipped geometry 8 of `bvh_01` is resident and valid).
+**The set is decided by the shader** (plan milestone 9): a geometry is left out exactly when its shader name hash (first word of the
+shader record; shader group at drawable `+0x10`, pointers at group `+0x10`, count at group `+0x18`, shader index per geometry in the
+model's `+0x20` u16 array) is hash A or hash B. It predicts the used set on all 8 identified BLAS (48 geometries).
 
-Next, in order of cost:
-
-1. The per-geometry shader: the model `+0x20` array is probably the shader index of each geometry; read the drawable's shader group
-   and compare the shaders (name hash, flags, render bucket) of used and skipped geometries. Alpha-blended, decal or "no ray tracing"
-   materials are the obvious suspects.
-2. Check whether the same drawable appears in two BLAS with different used sets (would rule out a static resource flag).
+Still open: what those two shaders are (alpha-blended, decal or "no ray tracing" materials are the obvious guesses; the shader record
+holds more words that may carry a flag the engine actually tests), and whether the same drawable ever appears in two BLAS with
+different used sets.
 
 Acceptance: a rule that predicts the used set for the three verified samples and for `bvh_01`/`bvh_03`/`bvh_07`, with the
 rehydration difference still 0 when the predicted mapping is used.

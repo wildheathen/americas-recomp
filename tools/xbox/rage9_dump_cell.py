@@ -68,7 +68,21 @@ class W:
             raise ValueError("range")
         return at
 
+    def shader_hashes(self, drawable):
+        """The first word (name hash) of every shader of the drawable's shader group, in group order; [] if unreadable.
+
+        shader group at drawable +0x10: pointer array at +0x10, u16 count at +0x18.
+        """
+        try:
+            group = self.S(drawable + 0x10, 32)
+            count = self.u16(group + 0x18)
+            arr = self.S(group + 0x10, 8 * count)
+            return [self.u32(self.S(arr + 8 * k, 8)) for k in range(count)]
+        except ValueError:
+            return []
+
     def geos(self, drawable):
+        shaders = self.shader_hashes(drawable)
         lod = self.S(drawable + 80, 16)
         models = self.u16(lod + 8)
         lst = self.S(lod, models * 8)
@@ -77,6 +91,7 @@ class W:
             model = self.S(lst + mi * 8, 56)
             count = self.u16(model + 16)
             geo = self.S(model + 8, count * 8)
+            shader_index = self.S(model + 0x20, 2 * count)   # u16 shader index per geometry (the identity on every model seen)
             for gi in range(count):
                 g = self.S(geo + gi * 8, 160)
                 vb = self.S(g + 8, 80)
@@ -84,7 +99,8 @@ class W:
                 flags = self.u32(fvf + 0x138)
                 desc = self.S(g + 64, 16)
                 ib = self.S(desc, 64)
-                out.append({"index": gi, "model": mi, "vertices": flags >> 10, "triangles": self.u16(desc + 10),
+                si = self.u16(shader_index + 2 * gi)
+                out.append({"index": gi, "model": mi, "shader_hash": shaders[si] if si < len(shaders) else None, "vertices": flags >> 10, "triangles": self.u16(desc + 10),
                             "clusters": self.u16(desc + 8),
                             "vb": self.u64(vb + 24) - BASE_GFX, "vb_len": self.u32(vb + 8) * self.u16(vb + 12),
                             "pos_off": self.u32(fvf), "pos_size": self.s[fvf + 0xD0],

@@ -166,10 +166,18 @@ What it took beyond milestone 7:
   library output (0 bytes different) has the same 14 boxes that miss enclosure by about an ulp. The override check allows 4 ulp,
   `validate_rehydrated_bvh` needs `enclosure_rtol=1e-6` on that sample. A fused multiply-add in the quantized decode was tested and
   ruled out: it moves `bvh_08` from a zero bounds error to 4.7e-8.
-- *The selection rule is still unknown,* but it is not a prefix rule: `bvh_07` uses the last three geometries, `bvh_01` and `bvh_03`
-  skip one in the middle. It is not visible in the 160-byte geometry record (the words at `+88`, `+92`, `+96` are equal for used and
-  skipped geometries; `+48` looks like a hash), in the index descriptor, in the vertex-format flags, or in the model's `+0x20` u16 array
-  (the identity on all four drawables checked). The next place to look is the per-geometry shader of the drawable's shader group.
+- *The selection rule is the shader* (milestone 9).
+
+Milestone 9, done: **which geometries the BLAS keeps.** It is not a prefix rule (`bvh_07` uses the last three of twelve geometries,
+`bvh_01` and `bvh_03` skip one in the middle), and it is not in the 160-byte geometry record (`+88`, `+92`, `+96` equal for used and
+skipped geometries, `+48` hash-like), the index descriptor, the vertex-format flags or the presence of the data in the pages. It is the
+geometry's shader: the drawable's shader group is at `+0x10`, with a pointer array at group `+0x10` and a u16 count at group `+0x18`;
+the model's u16 array at `+0x20` gives each geometry's shader index (the identity on every model seen); the shader's first word is a
+name hash. **A geometry is left out of the BLAS exactly when its shader hash is hash A or hash B.** On the 8 identified
+BLAS (48 geometries, 8 distinct shader hashes: 6 kept, 2 left out) the rule predicts the used set every time, including `bvh_02` (3 of 7: the 4 skipped
+ones carry those two hashes) and `bvh_07` (8 of the 9 skipped carry hash A, one hash B). The shader names are not needed and
+not recorded. `rage9_dump_cell.py` reads the hash per geometry and `rage9_score_blas.py` reports, per candidate, whether its used set is
+the predicted one.
 
 ## Open questions
 

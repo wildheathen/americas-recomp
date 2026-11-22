@@ -8,7 +8,8 @@ For one BLAS this:
      geometries (separate quantized-8 position stream, meshlet triangles), applies the BLAS's instance transform, rehydrates with the
      CPU model and scores the result with bvh_rehydrate_cpu.stored_geometry_checks: leaves inside the header bounds, leaf union equal
      to the header bounds, stored box overrides consistent, and the internal box area as the tie-break.
---unordered also tries the geometries in any order, not only as an ordered subsequence.
+--unordered also tries the geometries in any order, not only as an ordered subsequence. Each scored candidate also says whether its
+used set is the one the shader rule predicts (geometries whose shader name hash is in NON_RT_SHADER_HASHES are left out).
 A candidate is accepted only if the checks are consistent. Prints counts and stream offsets; drawable names only with --names, and
 they stay local. With --write <dir> the best candidate's float3/uint32 buffers and export.json are written for
 compare_bvh_geometry.py.
@@ -27,6 +28,14 @@ from rage9_dump_cell import BASE_SYS, MAGIC, W, streams
 from rage9_export_geometry import decode_positions, decode_triangles, read_instance_transform
 
 MAX_RUN_PAGES = 64
+# Shaders whose geometries the BLAS leaves out (measured on 8 BLAS, 48 geometries: every skipped geometry has one of these, no used
+# one does). The rule predicts the used set; the scorer reports whether each candidate agrees.
+NON_RT_SHADER_HASHES = frozenset({0xAAAA0001, 0xBBBB0002})   # placeholders: the real values are game data, kept out
+
+
+def rule_used(model_geos):
+    """Indices of the model's geometries the selection rule keeps in the BLAS."""
+    return [k for k, g in enumerate(model_geos) if g.get("shader_hash") not in NON_RT_SHADER_HASHES]
 NEAR_PAGES = 48
 
 
@@ -93,9 +102,10 @@ def scan(window, sig, cap, ordered=True):
                 if key in seen:
                     continue
                 seen.add(key)
+                predicted = rule_used(model)
                 for used in embeddings(sig, counts, cap, ordered):
                     cands.append({"stream": off, "name": name, "model": mi, "counts": counts, "used": used,
-                                  "geos": [model[k] for k in used]})
+                                  "geos": [model[k] for k in used], "rule_agrees": used == predicted})
     pages.sort(key=lambda x: x[0])
     return pages, cands
 
@@ -214,7 +224,8 @@ def main(argv):
         ratio = "%.3f" % (area / best_area) if best_area else "-"
         print("   %s%-10s stream 0x%-8x m%d used %-24s run 0x%x+%d | outside %d bounds %.1e overrides %d/%d area x%s" % (
             label, "CONSISTENT" if not bad else "rejected", c["stream"], c["model"], c["used"], pages[run.start][0], run.n,
-            chk.leaves_outside_header, chk.header_bounds_error, chk.overrides_consistent, chk.overrides_inconsistent, ratio))
+            chk.leaves_outside_header, chk.header_bounds_error, chk.overrides_consistent, chk.overrides_inconsistent, ratio)
+              + (" | shader rule agrees" if c["rule_agrees"] else " | shader rule differs"))
     accepted = [r for r in results if not r[0]]
     print("accepted %d of %d scored" % (len(accepted), len(results)))
     if opts["--write"] and results:
