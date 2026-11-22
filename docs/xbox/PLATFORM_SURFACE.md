@@ -122,7 +122,11 @@ matches the CPU model **byte for byte** (0 of 1,088 bytes differ). `XS_TRACE=1` 
 export rehydrates on the CPU (or falls back to it). The GPU side is `RehydrateRaytracingAccelerationStructureBatchedX` (command list,
 `BVH_REHYDRATE_BATCHED=1`): with a PC `ID3D12GraphicsCommandList8` behind the proxy it faults inside the vendor driver at `+0x1f` of the
 export, reading a truncated pointer, so the command-list call contract (which Xbox slot or argument shape it expects) is the next thing
-to pin down.
+to pin down. The export loads its context from `this+8` and forwards `(context, command list, descs, count, 0)` to an internal loop;
+`+0x1f` is the return address of that call. The debug layer reports `SetComputeRoot32BitConstant` with no root signature bound just
+before the fault, and `XS_TRACE` logs no proxy slot at all: the builder is calling the real PC command list, which points at
+`QueryInterface` in the proxy (it forwards and returns the real object). The same applies to the device, so the proxy should answer
+`QueryInterface` with itself; that would also expose the Xbox slot numbering for mapping.
 
 **Build path (reached, not finished)**: `BVH_BUILD=1` calls `BuildRaytracingAccelerationStructure` for a three-vertex triangle with
 the Xbox device proxy (slot 76 resource creation, wrapped heaps), and `BVH_TRACE=1` shows the sequence. The builder asks the command
