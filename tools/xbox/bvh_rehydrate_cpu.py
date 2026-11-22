@@ -1027,7 +1027,8 @@ def _box_encloses(
     rtol: float = 0.0,
 ) -> bool:
     for ax in range(3):
-        scale = max(abs(outer[ax]), abs(outer[ax + 3]), abs(inner[ax]), abs(inner[ax + 3]), 1.0)
+        # Infinite outer bounds (the builder's box16 +-inf) are conservative; keep the tolerance finite so inf * 0 is not NaN.
+        scale = max([abs(v) for v in (outer[ax], outer[ax + 3], inner[ax], inner[ax + 3]) if math.isfinite(v)] + [1.0])
         eps = scale * rtol
         if outer[ax] > inner[ax] + eps or outer[ax + 3] < inner[ax + 3] - eps:
             return False
@@ -1126,8 +1127,9 @@ def validate_rehydrated_bvh(
             box = boxes[slot]
             if cid == INVALID_NODE:
                 continue
-            if not all(math.isfinite(x) for x in box):
-                errors.append(f"Non-finite AABB in box 0x{nid:08x} slot {slot}: {box}")
+            # +-inf is a valid conservative bound (box16 overflow); only NaN is malformed.
+            if any(math.isnan(x) for x in box):
+                errors.append(f"NaN AABB in box 0x{nid:08x} slot {slot}: {box}")
             elif box[0] > box[3] or box[1] > box[4] or box[2] > box[5]:
                 errors.append(f"Inverted AABB in box 0x{nid:08x} slot {slot}: {box}")
             stack.append((cid, depth + 1, nid))

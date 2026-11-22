@@ -172,7 +172,7 @@ def main():
         g.append(bvh.TriangleGeometryDesc(vertex_buffer=vb, vertex_stride=a.stride, index_buffer=ib, index_format=ifmt))
     dst = bytes(bvh.rehydrate_bvh(src, geometries=g))
     rep = bvh.validate_rehydrated_bvh(dst, check_aabb_enclosure=True, check_parent_pointers=True)
-    kinds = sorted({("does not enclose" if "does not enclose" in e else "non-finite" if "Non-finite" in e else
+    kinds = sorted({("does not enclose" if "does not enclose" in e else "NaN" if "NaN AABB" in e else
                      "inverted" if "Inverted" in e else e.split(" ")[0]) for e in rep.errors})
     print("assigned run: errors", len(rep.errors), "kinds", kinds)
     if a.out:

@@ -94,7 +94,7 @@ def main():
     rep = bvh.validate_rehydrated_bvh(model, check_aabb_enclosure=True, check_parent_pointers=True)
     res["model"] = {"valid": rep.valid, "errors": len(rep.errors),
                     "error_kinds": sorted({("does not enclose" if "does not enclose" in e else
-                                           "non-finite AABB" if "Non-finite" in e else
+                                           "NaN AABB" if "NaN AABB" in e else
                                            "inverted AABB" if "Inverted" in e else e.split(" ")[0]) for e in rep.errors}),
                     "box32": rep.visited_box32, "box16": rep.visited_box16, "leaves": rep.visited_leaves,
                     "leaf_bounds": leaf_metrics(model, header)}

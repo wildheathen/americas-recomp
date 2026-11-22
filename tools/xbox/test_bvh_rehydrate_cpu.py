@@ -534,6 +534,45 @@ class TestEndToEndBoxRehydration(unittest.TestCase):
         rep = bvh.validate_rehydrated_bvh(bytes(still_comp), check_parent_pointers=False)
         self.assertFalse(rep.valid)
 
+    def _box16_over_one_leaf(self, halves):
+        total, leaf_off, hier_off = 0x200, 0x100, 0x140
+        buf = bytearray(total)
+        struct.pack_into(
+            "<12f4I", buf, leaf_off,
+            1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 1.0, 5.0, 6.0, 0.0, 0.0, 0.0,
+            0x01, 0, bvh.INVALID_NODE, 0x009,
+        )
+        leaf_id = ((leaf_off >> 6) << 3) | bvh.NODE_TYPE_TRI0
+        struct.pack_into("<4I", buf, hier_off, leaf_id, bvh.INVALID_NODE, bvh.INVALID_NODE, bvh.INVALID_NODE)
+        struct.pack_into("<6H", buf, hier_off + 16, *halves)
+        root_id = ((hier_off >> 6) << 3) | bvh.NODE_TYPE_BOX16
+        buf[:64] = _make_bvh_header(
+            flags=bvh.BVH_FLAG_BLAS, total_bytes=total, num_leaves=1,
+            offset_to_hierarchy=hier_off, root_node_id=root_id, offset_to_leaves=leaf_off,
+        )
+        return bytes(buf)
+
+    def test_infinite_box16_bound_is_valid_and_encloses(self):
+        # The builder writes +-inf (0x7C00 / 0xFC00) when a bound exceeds half range; that is a conservative bound.
+        h = bvh._f32_to_f16_bits
+        buf = self._box16_over_one_leaf((0xFC00, h(2.0), h(3.0), 0x7C00, h(5.0), h(6.0)))
+        rep = bvh.validate_rehydrated_bvh(buf, check_aabb_enclosure=True, check_parent_pointers=False)
+        self.assertTrue(rep.valid, rep.errors)
+        self.assertEqual(rep.visited_leaves, 1)
+
+        # An infinite bound that is too small on the finite axes still fails enclosure.
+        tight = self._box16_over_one_leaf((0xFC00, h(2.0), h(3.0), 0x7C00, h(4.0), h(6.0)))
+        rep = bvh.validate_rehydrated_bvh(tight, check_aabb_enclosure=True, check_parent_pointers=False)
+        self.assertFalse(rep.valid)
+        self.assertTrue(any("does not enclose" in e for e in rep.errors), rep.errors)
+
+    def test_nan_box16_bound_is_an_error(self):
+        h = bvh._f32_to_f16_bits
+        buf = self._box16_over_one_leaf((0x7E00, h(2.0), h(3.0), h(4.0), h(5.0), h(6.0)))
+        rep = bvh.validate_rehydrated_bvh(buf, check_aabb_enclosure=True, check_parent_pointers=False)
+        self.assertFalse(rep.valid)
+        self.assertTrue(any("NaN AABB" in e for e in rep.errors), rep.errors)
+
 
 class TestBvhTraversal(unittest.TestCase):
     def test_nearest_hit_miss_and_interval(self):
