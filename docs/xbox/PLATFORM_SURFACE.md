@@ -116,9 +116,11 @@ Box16 levels, plain float vertices, no game data) together with the CPU model's 
 three files to `bvh_test`, which calls `ValidateRehydrateAccelerationStructureBuildDesc` and then the export. On the PC the export reads
 `SourceAccelerationStructureData` as a **CPU pointer**, which is what it is on the console (the allocation's CPU and GPU addresses are
 the same). Emulating that with a `VirtualAlloc` mapping at the buffer's GPU virtual address makes the validation return `S_OK` for the
-fixture when the source and vertices are separate buffers (sharing one 64 KiB allocation instead returned `E_INVALIDARG`, still open);
-the rehydrate call still faults, so the source is not the only address it dereferences on the CPU (the vertices, destination or
-an internal stream are candidates). The fixture and the aliasing are the base for continuing.
+fixture when the source and vertices are separate buffers (sharing one 64 KiB allocation instead returned `E_INVALIDARG`, still open),
+and with the source, vertices, destination and scratch all mapped that way the rehydrate call returns `S_OK` and writes a BVH that
+matches the CPU model **byte for byte** (0 of 1,088 bytes differ). `XS_TRACE=1` shows no device call at all on that path, so this
+export rehydrates on the CPU (or falls back to it); the GPU side is the `RehydrateRaytracingAccelerationStructureBatchedX` variant that
+takes a command list, which is the next thing to drive.
 
 **Build path (reached, not finished)**: `BVH_BUILD=1` calls `BuildRaytracingAccelerationStructure` for a three-vertex triangle with
 the Xbox device proxy (slot 76 resource creation, wrapped heaps), and `BVH_TRACE=1` shows the sequence. The builder asks the command

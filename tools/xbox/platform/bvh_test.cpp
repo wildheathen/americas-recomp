@@ -536,21 +536,33 @@ int main(int argc, char** argv) {
                 return r;
             };
             const UINT64 VB_OFF = 0x8000;
-            ComPtr<ID3D12Resource> dataBuf;
-            void* aliasPtr = nullptr;
-            for (int attempt = 0; attempt < 8 && !aliasPtr; attempt++) {
-                dataBuf = mkdef(0x10000, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-                aliasPtr = VirtualAlloc((void*)(uintptr_t)dataBuf->GetGPUVirtualAddress(), 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-                if (!aliasPtr) dataBuf.Reset();
-            }
-            ComPtr<ID3D12Resource> dstBuf = mkdef(expected.size(), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            ComPtr<ID3D12Resource> scratchBuf = mkdef(1 << 20, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            printf("  [rehydrate] src+vb buffer VA %llx, CPU alias %p\n",
-                   dataBuf ? (unsigned long long)dataBuf->GetGPUVirtualAddress() : 0ull, aliasPtr);
+            auto createAliased = [&](UINT64 bytes, D3D12_RESOURCE_FLAGS fl, void** aliasOut, bool zero) {
+                ComPtr<ID3D12Resource> r;
+                SIZE_T n = (SIZE_T)((bytes + 0xFFF) & ~0xFFFull);
+                for (int attempt = 0; attempt < 8; attempt++) {
+                    r = mkdef(bytes, fl);
+                    if (!r) break;
+                    void* p = VirtualAlloc((void*)(uintptr_t)r->GetGPUVirtualAddress(), n, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                    if (p) { if (zero) memset(p, 0, n); *aliasOut = p; return r; }
+                    r.Reset();
+                }
+                *aliasOut = nullptr;
+                return r;
+            };
+            void* dataAlias = nullptr, *dstAlias = nullptr, *scratchAlias = nullptr;
+            ComPtr<ID3D12Resource> dataBuf = createAliased(0x10000, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, &dataAlias, false);
+            ComPtr<ID3D12Resource> dstBuf = createAliased((UINT64)expected.size(), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, &dstAlias, true);
+            ComPtr<ID3D12Resource> scratchBuf = createAliased(1 << 20, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, &scratchAlias, true);
+            printf("  [rehydrate] data VA %llx alias %p; dst VA %llx alias %p; scratch VA %llx alias %p\n",
+                   dataBuf ? (unsigned long long)dataBuf->GetGPUVirtualAddress() : 0ull, dataAlias,
+                   dstBuf ? (unsigned long long)dstBuf->GetGPUVirtualAddress() : 0ull, dstAlias,
+                   scratchBuf ? (unsigned long long)scratchBuf->GetGPUVirtualAddress() : 0ull, scratchAlias);
             std::vector<char> blob(0x10000, 0);
             memcpy(blob.data(), src.data(), src.size());
             memcpy(blob.data() + VB_OFF, vb.data(), vb.size());
-            if (aliasPtr) memcpy(aliasPtr, blob.data(), blob.size());
+            SIZE_T dataOff = (SIZE_T)(dataBuf->GetGPUVirtualAddress() - (UINT64)(uintptr_t)dataAlias);
+            SIZE_T dstOff = (SIZE_T)(dstBuf->GetGPUVirtualAddress() - (UINT64)(uintptr_t)dstAlias);
+            if (dataAlias) memcpy((char*)dataAlias + dataOff, blob.data(), blob.size());
             D3D12_HEAP_PROPERTIES uph = {D3D12_HEAP_TYPE_UPLOAD};
             D3D12_RESOURCE_DESC urd = {D3D12_RESOURCE_DIMENSION_BUFFER, 0, 0x10000, 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE};
             ComPtr<ID3D12Resource> blobUp;
@@ -598,7 +610,10 @@ int main(int argc, char** argv) {
             printf("  [rehydrate] call -> 0x%08lx, device removed 0x%08lx\n", (unsigned long)rh, (unsigned long)dev->GetDeviceRemovedReason());
             DumpMessages(dev.Get());
             if (SUCCEEDED(dev->GetDeviceRemovedReason())) {
-                ComPtr<ID3D12Resource> rb = mkdef(expected.size(), D3D12_RESOURCE_FLAG_NONE);
+                D3D12_HEAP_PROPERTIES rhp = {D3D12_HEAP_TYPE_READBACK};
+                D3D12_RESOURCE_DESC rrd = {D3D12_RESOURCE_DIMENSION_BUFFER, 0, expected.size(), 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE};
+                ComPtr<ID3D12Resource> rb;
+                dev->CreateCommittedResource(&rhp, D3D12_HEAP_FLAG_NONE, &rrd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb));
                 D3D12_RESOURCE_BARRIER b = {};
                 b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.pResource = dstBuf.Get();
                 b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -615,7 +630,20 @@ int main(int argc, char** argv) {
                     size_t n = expected.size(), diff = 0, first = (size_t)-1;
                     for (size_t i = 0; i < n && i < expected.size(); i++)
                         if (((const unsigned char*)p)[i] != ((const unsigned char*)expected.data())[i]) { if (first == (size_t)-1) first = i; diff++; }
-                    printf("  [rehydrate] %zu of %zu bytes differ from the CPU model%s\n", diff, n, diff ? "" : " (match)");
+                    printf("  [rehydrate] GPU dest: %zu of %zu bytes differ from the CPU model%s\n", diff, n, diff ? "" : " (match)");
+                    if (dstAlias) {                       // the builder writes the header/parent area through the CPU pointer
+                        size_t d2 = 0, f2 = (size_t)-1;
+                        for (size_t i = 0; i < n; i++)
+                            if ((((const unsigned char*)dstAlias)[dstOff + i]) != ((const unsigned char*)expected.data())[i]) { if (f2 == (size_t)-1) f2 = i; d2++; }
+                        printf("  [rehydrate] CPU dest alias: %zu of %zu bytes differ%s\n", d2, n, d2 ? "" : " (match)");
+                        if (f2 != (size_t)-1) {
+                            printf("    alias first at 0x%zx: got", f2);
+                            for (size_t i = f2; i < f2 + 16 && i < n; i++) printf(" %02x", ((const unsigned char*)dstAlias)[dstOff + i]);
+                            printf(" expected");
+                            for (size_t i = f2; i < f2 + 16 && i < n; i++) printf(" %02x", ((const unsigned char*)expected.data())[i]);
+                            printf("\n");
+                        }
+                    }
                     if (first != (size_t)-1) {
                         printf("    first at 0x%zx: got", first);
                         for (size_t i = first; i < first + 16 && i < n; i++) printf(" %02x", ((const unsigned char*)p)[i]);
