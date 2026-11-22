@@ -24,6 +24,12 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
   ±FLT_MAX, half bounds saturate to ±65504): on a real 103-leaf sample that removes every non-finite AABB and leaves 144 of 11,328 bytes
   different, 36 coordinates off by one ULP where half bounds saturate (the sample is fed out-of-range synthetic geometry). The corpus figures
   in `docs/xbox/BVH_CONTAINER.md` were measured before this constant change.
+* `compare_bvh_geometry.py <src.bin> <vb.bin> <ib.bin> [--dll <rehydrate_cpu.exe>] [--out report.json]` runs the model and, optionally, the
+  library on one BLAS and one geometry and reports the byte difference, the leaf bounds (non-finite, inverted, degenerate, coordinate range),
+  the validation error kinds and whether the leaf primitives fit the index buffer. Baselines: with synthetic geometry the leaf coordinates are
+  0..786,432 and every Box16 bound saturates (72 enclosure errors); an exported character mesh gives z around -247,768, still outside the
+  ±65,504 half range. The leaf transform multiplies by up to 2^20, so the geometry the shader reads is the small pre-transform (quantised)
+  position, not an .obj in world space.
 * `xbox_device_proxy.h` now answers `QueryInterface` with the proxy itself when the real object returns its own pointer, so a caller
   that queries for a newer interface keeps going through the overrides. `bvh_test` records the Xbox command-list slot map learned so
   far (Dispatch 14, pipeline state 25, Xbox-only 26-29, PC slot + 4 from 30) in its probe overrides.
