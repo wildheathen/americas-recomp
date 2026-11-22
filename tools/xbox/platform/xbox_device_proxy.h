@@ -24,6 +24,19 @@ struct XboxObjectProxy {
         auto* self = (XboxObjectProxy*)regs[3];
         fprintf(stderr, "XS %s slot %u first call: rdx=%llx r8=%llx r9=%llx caller=%llx\n", self->name ? self->name : "object", slot, regs[2], regs[1], regs[0], regs[5]);
     }
+    // QueryInterface returns this proxy when the real object answers with itself, so a caller that queries for a newer interface
+    // (ID3D12Device11, ID3D12GraphicsCommandList8, ...) keeps going through the overrides instead of getting the real object.
+    // Interfaces implemented by another object (an info queue, for example) are passed through unchanged.
+    static HRESULT __fastcall QueryInterfaceProxy(XboxObjectProxy* self, REFIID riid, void** out) {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        HRESULT hr = ((IUnknown*)self->real)->QueryInterface(riid, out);
+        if (SUCCEEDED(hr) && *out == (void*)self->real) {
+            ((IUnknown*)self)->AddRef();
+            *out = self;
+        }
+        return hr;
+    }
     static XboxObjectProxy* Create(IUnknown* real, const char* name = "object") {
         auto* p = (XboxObjectProxy*)VirtualAlloc(nullptr, sizeof(XboxObjectProxy), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         p->real = real;
@@ -72,6 +85,7 @@ struct XboxObjectProxy {
             (void)t0;
             p->slots[i] = code + i * stride;
         }
+        p->slots[0] = (void*)&XboxObjectProxy::QueryInterfaceProxy;   // keep newer-interface callers on the proxy
         return p;
     }
     void PrintHits(const char* what) {

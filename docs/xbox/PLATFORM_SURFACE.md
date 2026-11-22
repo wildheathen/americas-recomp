@@ -123,10 +123,14 @@ export rehydrates on the CPU (or falls back to it). The GPU side is `RehydrateRa
 `BVH_REHYDRATE_BATCHED=1`): with a PC `ID3D12GraphicsCommandList8` behind the proxy it faults inside the vendor driver at `+0x1f` of the
 export, reading a truncated pointer, so the command-list call contract (which Xbox slot or argument shape it expects) is the next thing
 to pin down. The export loads its context from `this+8` and forwards `(context, command list, descs, count, 0)` to an internal loop;
-`+0x1f` is the return address of that call. The debug layer reports `SetComputeRoot32BitConstant` with no root signature bound just
-before the fault, and `XS_TRACE` logs no proxy slot at all: the builder is calling the real PC command list, which points at
-`QueryInterface` in the proxy (it forwards and returns the real object). The same applies to the device, so the proxy should answer
-`QueryInterface` with itself; that would also expose the Xbox slot numbering for mapping.
+`+0x1f` is the return address of that call. The proxy now returns itself from `QueryInterface` (a caller asking for
+`ID3D12Device11`/`ID3D12GraphicsCommandList8` used to get the real object and bypass every override). With that, the Xbox command-list
+vtable is visible: `Dispatch` stays at slot 14, slots 25-28 are four Xbox-only methods, and from 29 on each slot is the PC slot + 4
+(`33 -> 29` root signature, `35 -> 31` root table, `37 -> 33` root constant, `39 -> 35` root 32-bit constants, `45 -> 41` root UAV).
+Mapping those and stubbing 25, 80 and 146 lets `RehydrateRaytracingAccelerationStructureBatchedX` return `S_OK` and the list execute;
+it writes a 48-byte command stream (type 6, size 0x18, the vertex address and stride 12) and **leaves the destination untouched**,
+so those stubbed calls are what executes the stream on the console's hardware. Decoding them is the remaining step; the CPU variant
+above still matches the CPU model byte for byte.
 
 **Build path (reached, not finished)**: `BVH_BUILD=1` calls `BuildRaytracingAccelerationStructure` for a three-vertex triangle with
 the Xbox device proxy (slot 76 resource creation, wrapped heaps), and `BVH_TRACE=1` shows the sequence. The builder asks the command

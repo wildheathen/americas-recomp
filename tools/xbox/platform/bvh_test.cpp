@@ -86,6 +86,54 @@ static void __fastcall ClSetRootSig(XboxObjectProxy* self, ID3D12RootSignature* 
     if (Trace()) fprintf(stderr, "T cl SetComputeRootSignature %p\n", (void*)sig);
     ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootSignature(sig);
 }
+// The Xbox command-list vtable has four slots more than the PC one before SetComputeRootSignature: the builder calls slot 33 with
+// one pointer, which is the PC slot 29 (SetComputeRootSignature), while PC slot 33 is SetComputeRoot32BitConstant.
+static void __fastcall ClXbox33(XboxObjectProxy* self, ID3D12RootSignature* sig) {
+    if (Trace()) fprintf(stderr, "T cl xbox33 -> SetComputeRootSignature %p\n", (void*)sig);
+    ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootSignature(sig);
+}
+// Four Xbox-only slots follow Dispatch (14), so every later slot is the PC slot + 4: 33 -> 29 (root signature), 35 -> 31 (root table),
+// 37 -> 33 (root 32-bit constant), 29 -> 25 (pipeline state), 30 -> 26 (barrier), 32 -> 28 (descriptor heaps), 45 -> 41 (root UAV).
+static void __fastcall ClXbox35(XboxObjectProxy* self, UINT root, D3D12_GPU_DESCRIPTOR_HANDLE h) {
+    if (Trace()) fprintf(stderr, "T cl xbox35 -> SetComputeRootDescriptorTable %u %llx\n", root, (unsigned long long)h.ptr);
+    ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootDescriptorTable(root, h);
+}
+static void __fastcall ClXbox37(XboxObjectProxy* self, UINT root, UINT value, UINT off) {
+    if (Trace()) fprintf(stderr, "T cl xbox37 -> SetComputeRoot32BitConstant %u %u %u\n", root, value, off);
+    ((ID3D12GraphicsCommandList*)self->real)->SetComputeRoot32BitConstant(root, value, off);
+}
+static void __fastcall ClXbox29(XboxObjectProxy* self, ID3D12PipelineState* pso) {
+    if (Trace()) fprintf(stderr, "T cl xbox29 -> SetPipelineState %p\n", (void*)pso);
+    ((ID3D12GraphicsCommandList*)self->real)->SetPipelineState(pso);
+}
+static void __fastcall ClXbox30(XboxObjectProxy* self, UINT n, const D3D12_RESOURCE_BARRIER* b) {
+    if (Trace()) fprintf(stderr, "T cl xbox30 -> ResourceBarrier %u\n", n);
+    ((ID3D12GraphicsCommandList*)self->real)->ResourceBarrier(n, b);
+}
+static void __fastcall ClXbox32(XboxObjectProxy* self, UINT n, ID3D12DescriptorHeap* const* heaps) {
+    std::vector<ID3D12DescriptorHeap*> real(n);
+    for (UINT i = 0; i < n && heaps; i++) real[i] = UnwrapHeap(heaps[i]);
+    if (Trace()) fprintf(stderr, "T cl xbox32 -> SetDescriptorHeaps %u (%p -> %p)\n", n, n && heaps ? (void*)heaps[0] : nullptr, n ? (void*)real[0] : nullptr);
+    ((ID3D12GraphicsCommandList*)self->real)->SetDescriptorHeaps(n, real.data());
+}
+static void __fastcall ClXbox45(XboxObjectProxy* self, UINT root, D3D12_GPU_VIRTUAL_ADDRESS va) {
+    if (Trace()) fprintf(stderr, "T cl xbox45 -> SetComputeRootUnorderedAccessView %u %llx\n", root, (unsigned long long)va);
+    ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootUnorderedAccessView(root, va);
+}
+static void __fastcall ClXbox39(XboxObjectProxy* self, UINT root, UINT num, const void* data) {
+    if (Trace()) fprintf(stderr, "T cl xbox39 -> SetComputeRoot32BitConstants %u %u %p\n", root, num, data);
+    ((ID3D12GraphicsCommandList*)self->real)->SetComputeRoot32BitConstants(root, num, data, 0);
+}
+static void __fastcall ClUnknown146(XboxObjectProxy* self, UINT a, const void* b, const void* c) {
+    if (Trace()) fprintf(stderr, "T cl slot146 (a=%u b=%p c=%p), not mapped\n", a, b, c);
+}
+// Slots 25-28 are the four Xbox-only command-list methods (everything after them is shifted by four). Until their meaning is known,
+// log and no-op them so the builder can finish recording and the stream buffer can be inspected.
+static UINT64 __fastcall ClXboxOnly(XboxObjectProxy* self, UINT64 a, UINT64 b, UINT64 c, UINT64 d) {
+    if (Trace()) fprintf(stderr, "T cl xbox-only slot (a=%llu b=%llx c=%llx d=%llx), no-op\n",
+                         (unsigned long long)a, (unsigned long long)b, (unsigned long long)c, (unsigned long long)d);
+    return 0;
+}
 static void __fastcall ClSetTable(XboxObjectProxy* self, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE h) {
     if (Trace()) fprintf(stderr, "T cl SetComputeRootDescriptorTable %u %llx\n", i, (unsigned long long)h.ptr);
     ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootDescriptorTable(i, h);
@@ -97,9 +145,12 @@ static void __fastcall ClCopyBuffer(XboxObjectProxy* self, ID3D12Resource* d, UI
 // Xbox command-list extension used by the BVH builder (slot 148): reserve <bytes> of command stream, <align> aligned, and return the
 // pointer to fill. The PC command list has no equivalent; the builder writes its own 40-byte records into it. A plain allocation lets it
 // continue so the next Xbox-only call becomes visible.
+static void* g_reservePtr = nullptr;
+static unsigned g_reserveBytes = 0;
 static void* __fastcall ClReserve(XboxObjectProxy* self, unsigned bytes, unsigned align) {
     (void)self; (void)align;
     void* p = VirtualAlloc(nullptr, bytes ? bytes : 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (p) { g_reservePtr = p; g_reserveBytes = bytes; }
     if (Trace()) fprintf(stderr, "T cl slot148 reserve %u align %u -> %p\n", bytes, align, p);
     return p;
 }
@@ -668,6 +719,18 @@ int main(int argc, char** argv) {
                     printf("  [rehydrate] command list 8: 0x%08lx\n", (unsigned long)chr);
                     if (SUCCEEDED(chr)) {
                         XboxObjectProxy* blp = XboxObjectProxy::Create((IUnknown*)bl.Get(), "cmdlist8");
+                        blp->Override(33, (void*)ClXbox33);     // Xbox slot 33 = SetComputeRootSignature (PC slot 29)
+                        blp->Override(148, (void*)ClReserve);   // Xbox extension: command-stream reservation
+                        blp->Override(35, (void*)ClXbox35);     // -> SetComputeRootDescriptorTable
+                        blp->Override(37, (void*)ClXbox37);     // -> SetComputeRoot32BitConstant
+                        blp->Override(29, (void*)ClXbox29);     // -> SetPipelineState
+                        blp->Override(30, (void*)ClXbox30);     // -> ResourceBarrier
+                        blp->Override(32, (void*)ClXbox32);     // -> SetDescriptorHeaps
+                        blp->Override(45, (void*)ClXbox45);     // -> SetComputeRootUnorderedAccessView
+                        blp->Override(39, (void*)ClXbox39);     // -> SetComputeRoot32BitConstants
+                        blp->Override(146, (void*)ClUnknown146); // Xbox extension, not identified yet (no-op probing)
+                        blp->Override(25, (void*)ClXboxOnly);   // Xbox-only slots 25-28
+                        blp->Override(80, (void*)ClXboxOnly);   // probe: unknown shape, no-op
                         if (dstAlias) memset((char*)dstAlias + dstOff, 0, expected.size());
                         long brh = SehRehydrateBatched(batched, obj, (ID3D12GraphicsCommandList8*)blp, &bd);
                         printf("  [rehydrate] batched call -> 0x%08lx, device removed 0x%08lx\n", (unsigned long)brh, (unsigned long)dev->GetDeviceRemovedReason());
@@ -685,6 +748,48 @@ int main(int argc, char** argv) {
                             HANDLE ev2 = CreateEvent(0, 0, 0, 0); fe->SetEventOnCompletion(1, ev2); WaitForSingleObject(ev2, 30000);
                             printf("  [rehydrate] batched executed, device removed 0x%08lx\n", (unsigned long)dev->GetDeviceRemovedReason());
                             DumpMessages(dev.Get());
+                            if (g_reservePtr && g_reserveBytes) {
+                                printf("  [rehydrate] stream buffer %u bytes:", g_reserveBytes);
+                                for (unsigned i = 0; i < g_reserveBytes && i < 48; i++) printf(" %02x", ((const unsigned char*)g_reservePtr)[i]);
+                                printf("\n");
+                            }
+                            // read the GPU destination back and compare with the CPU model
+                            D3D12_HEAP_PROPERTIES rhp2 = {D3D12_HEAP_TYPE_READBACK};
+                            D3D12_RESOURCE_DESC rrd2 = {D3D12_RESOURCE_DIMENSION_BUFFER, 0, expected.size(), 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE};
+                            ComPtr<ID3D12Resource> rb2;
+                            dev->CreateCommittedResource(&rhp2, D3D12_HEAP_FLAG_NONE, &rrd2, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb2));
+                            ComPtr<ID3D12CommandAllocator> ca2; dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&ca2));
+                            ComPtr<ID3D12GraphicsCommandList4> cl2;
+                            dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, ca2.Get(), nullptr, IID_PPV_ARGS(&cl2));
+                            D3D12_RESOURCE_BARRIER bb = {};
+                            bb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; bb.Transition.pResource = dstBuf.Get();
+                            bb.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; bb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                            bb.Transition.Subresource = 0xffffffff;
+                            cl2->ResourceBarrier(1, &bb);
+                            cl2->CopyResource(rb2.Get(), dstBuf.Get());
+                            cl2->Close();
+                            ComPtr<ID3D12CommandQueue> q2; D3D12_COMMAND_QUEUE_DESC qd2 = {};
+                            dev->CreateCommandQueue(&qd2, IID_PPV_ARGS(&q2));
+                            ID3D12CommandList* ls2[] = {cl2.Get()};
+                            q2->ExecuteCommandLists(1, ls2);
+                            ComPtr<ID3D12Fence> fe2; dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fe2));
+                            q2->Signal(fe2.Get(), 1);
+                            HANDLE ev3 = CreateEvent(0, 0, 0, 0); fe2->SetEventOnCompletion(1, ev3); WaitForSingleObject(ev3, 30000);
+                            void* p2 = nullptr;
+                            if (SUCCEEDED(rb2->Map(0, nullptr, &p2)) && p2) {
+                                size_t d = 0;
+                                for (size_t i = 0; i < expected.size(); i++) if (((const unsigned char*)p2)[i] != ((const unsigned char*)expected.data())[i]) d++;
+                                printf("  [rehydrate] batched GPU dest: %zu of %zu bytes differ%s\n", d, expected.size(), d ? "" : " (match)");
+                                if (d) {
+                                    size_t i = 0; while (i < expected.size() && ((const unsigned char*)p2)[i] == ((const unsigned char*)expected.data())[i]) i++;
+                                    printf("    first at 0x%zx: got", i);
+                                    for (size_t k = i; k < i + 16 && k < expected.size(); k++) printf(" %02x", ((const unsigned char*)p2)[k]);
+                                    printf(" expected");
+                                    for (size_t k = i; k < i + 16 && k < expected.size(); k++) printf(" %02x", ((const unsigned char*)expected.data())[k]);
+                                    printf("\n");
+                                }
+                                rb2->Unmap(0, nullptr);
+                            }
                         }
                     }
                 }
