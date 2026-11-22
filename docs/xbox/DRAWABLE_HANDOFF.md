@@ -137,8 +137,10 @@ rehydration difference still 0 when the predicted mapping is used.
 
 `bvh_01`, `bvh_03`, `bvh_04`, `bvh_07` and `bvh_09` are identified and verified (plan milestone 8). Left:
 
-- `bvh_05` and `bvh_06`: no consistent candidate in either window. The leaves use every primitive index of each geometry, so no
-  triangles were dropped. Their drawables have to come from another carve of `levels.rpf`; run `rage9_score_blas.py` on it.
+- `bvh_05` and `bvh_06`: no single drawable anywhere in `levels.rpf` (all 71 GB searched; plan milestone 8). The leaves use every
+  primitive index of each geometry, so no triangles were dropped. Next: test whether they combine several drawables (score
+  per-geometry-index against single geometries, using the header bounds and overrides of that index's leaves), or look in the other
+  archives of the package.
 
 ### 5.3 Bound-box checks and the validator (done)
 

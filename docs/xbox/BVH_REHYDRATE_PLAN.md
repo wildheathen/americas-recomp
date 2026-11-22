@@ -154,7 +154,12 @@ each candidate with the checks of milestone 7, and the accepted one is then rehy
 | `bvh_09` | 103 | 1 geometry | 2 (+10 in the second window) | one consistent (bounds 0); the others miss by 0.44 to 23 | 0 / 11,328 bytes |
 
 `bvh_05` ([152, 84]) and `bvh_06` (29 geometries) have no consistent candidate in either window, even with the geometries taken in
-any order; their drawables are not in the carved windows.
+any order. A search of the whole of `levels.rpf` (71 GB, read in 1 GB blocks with an 8 MB overlap; GB 0-1 hold no drawables) finds no
+single drawable for either: no model, and no drawable with all its models concatenated, contains `bvh_06`'s signature, and none of
+the 250 drawables that hold a 152- and an 84-triangle geometry keeps exactly those two under the shader rule (milestone 9). `bvh_06`'s
+20 counts of 1,000 triangles or more are scattered, at most 3 in one stream. So these two BLAS are either built from several
+drawables or from geometry outside `levels.rpf`; the drawable enumeration relies on the name pointer at `+168`, which is the other
+limit of the search.
 
 What it took beyond milestone 7:
 
