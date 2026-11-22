@@ -58,7 +58,12 @@ Steps:
 
 ## Open questions
 
-- Which record links a geometry index to a mesh when one BLAS uses several indices; per-index leaf bounds are the current candidate.
+- **The geometry index array lives in the drawable, not in the BLAS.** Public measurements of the same title's model resources
+  describe a drawable with a primary-LOD geometry list (one entry per geometry index, tens to hundreds of entries): a geometry record
+  points to the vertex buffer at `+8` and to the meshlet descriptor, which selects the index buffer, at `+64`; the buffers' own
+  descriptors carry the vertex/reference/triangle counts. Recovering the index-to-mesh mapping therefore means decoding the drawable
+  resource of the cell, which needs that resource's page/pointer layout in `levels.rpf` (the archive is paged and relocated). The
+  documented facts are reusable; the reference implementation is GPL-3, so our parser has to be written from the facts.
 - Whether the 21 box16 enclosure warnings are expected on the console as well (half saturation), or whether the leaf transform for
   this cell should be decoded differently.
 - Whether upstream wants this tool set at all: their merged work (#34, #112, #119) covers the CPU model and the address lowering, not
