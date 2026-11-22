@@ -20,8 +20,10 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
   the placeholder extremes a leaf gets when its triangle is unusable.
 * `obj_to_geometry.py in.obj out_vb.bin out_ib.bin` converts a Wavefront mesh into those two buffers, e.g. one exported by a model viewer
   (`--extract-models` of PercyStar writes .obj). Fed to a real BLAS the rehydration runs (S_OK) but the result is not the game's mesh: the
-  compressed BLAS does not say which vertex/index buffers it references. The CPU model's empty-bound marker is ±INF where the library uses
-  ±FLT_MAX (switching it moves a real sample from 576 to 144 differing bytes and leaves 72 non-finite AABBs from elsewhere).
+  compressed BLAS does not say which vertex/index buffers it references. The CPU model now uses the library's own markers (empty bounds are
+  ±FLT_MAX, half bounds saturate to ±65504): on a real 103-leaf sample that removes every non-finite AABB and leaves 144 of 11,328 bytes
+  different, 36 coordinates off by one ULP where half bounds saturate (the sample is fed out-of-range synthetic geometry). The corpus figures
+  in `docs/xbox/BVH_CONTAINER.md` were measured before this constant change.
 * `xbox_device_proxy.h` now answers `QueryInterface` with the proxy itself when the real object returns its own pointer, so a caller
   that queries for a newer interface keeps going through the overrides. `bvh_test` records the Xbox command-list slot map learned so
   far (Dispatch 14, pipeline state 25, Xbox-only 26-29, PC slot + 4 from 30) in its probe overrides.
