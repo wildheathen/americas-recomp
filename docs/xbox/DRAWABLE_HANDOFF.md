@@ -27,7 +27,7 @@ Verified end to end (library `S_OK`, CPU model byte-identical to the library):
 | BLAS | geometries | bytes | difference | identification |
 | --- | --- | --- | --- | --- |
 | `bvh_00` | 3 | 18,880 | 0 | unique exact signature [68, 234, 48] |
-| `bvh_02` | 3 of 7 | 33,280 | 0 | unique prefix [116, 336, 90]; 3 inverted boxes from the library |
+| `bvh_02` | 3 of 7 | 33,280 | 0 | unique prefix [116, 336, 90]; 3 non-finite (inf) boxes from the library |
 | `bvh_08` | 6 | 199,744 | 0 | unique exact signature [5, 131, 1020, 264, 1168, 654]; 2 inverted boxes |
 
 Signature matching over the 1 GB window (1,158 drawables, 5,346 geometries, 1,046 distinct counts):
@@ -136,11 +136,20 @@ rehydration difference still 0 when the predicted mapping is used.
 - `bvh_06`: its drawable is outside both windows (16 of 29 counts do not exist); carve another window or record it as unavailable.
 - `bvh_07`: confirm or drop the subsequence candidate with the AABB check.
 
-### 5.3 The inverted boxes
+### 5.3 Bound-box checks and the validator
 
-`validate_rehydrated_bvh` reports 2 inverted boxes on `bvh_08` and 3 on `bvh_02`, and the library writes the same bytes. Decide
-whether they sit on degenerate triangles (zero area, never hit) by decoding the node's triangle vertices. Then either relax the
-validator with a comment or keep the errors and document them. Do not "fix" the encoder to hide them.
+Two different things are conflated in `validate_rehydrated_bvh`:
+
+1. `bvh_02` reports three `non-finite AABB` errors. Those boxes carry the builder's intentional `+-inf` (`0x7C00` / `0xFC00`),
+   written when a bound exceeds half range, and the library writes the same bytes. Treating infinity as an error is a validator gap:
+   only NaN should fail, infinity is a valid conservative bound. Fix the validator, add a test with an infinite box, and the
+   enclosure check can then run on those nodes too.
+2. `bvh_08` reports two `inverted AABB` errors (for example min x 41,664.004 against max x 39,168). They are in the library output
+   as well (difference 0). Decode the node's triangle vertices and check the area: if the triangle is degenerate, keep the boxes and
+   document them; otherwise look for a rounding difference in the encoder.
+
+Acceptance: `bvh_00`, `bvh_02` and `bvh_08` validate cleanly under the corrected rules, the test suite covers an infinite box, and the
+inverted case is explained in the plan.
 
 ### 5.4 Replace `assign_bvh_geometry.py`
 
@@ -153,8 +162,8 @@ impossible.
 
 - The drawable name is plaintext in the system page (pointer at `+168`), so the hashed dictionaries are not needed to name a
   drawable. Keep the names out of the repository; state the fact, not the strings.
-- `BVH_REHYDRATE_PLAN.md` still says `bvh_01`/`bvh_03` have no match; update it with the subsequence result (section 1 here).
-- Record the per-geometry record stride and the box16 inf sentinel in `BVH_CONTAINER.md` next to the rehydration section.
+- Keep `BVH_REHYDRATE_PLAN.md` in sync with the subsequence result (it is updated for now), and record the per-geometry record stride
+  and the box16 inf sentinel in `BVH_CONTAINER.md` next to the rehydration section.
 
 ### 5.6 Second window and robustness
 

@@ -116,8 +116,10 @@ and is the first open task in `docs/xbox/DRAWABLE_HANDOFF.md`.
   were the fact source: a geometry record points to the vertex buffer at `+8` and to the meshlet descriptor, which selects the index
   buffer, at `+64`; the buffers' own descriptors carry the vertex/reference/triangle counts. The parser is our own; the reference
   implementation is GPL-3 and no code was copied.
-- Whether the two inverted boxes the builder emits for this cell matter on the console, or whether they sit on degenerate triangles
-  where an empty box is harmless. The model and the library agree byte for byte, so it is not a decoder difference.
+- The bound checks need a decision: the builder writes `+-inf` for a bound beyond half range, and `validate_rehydrated_bvh` currently
+  counts those as non-finite errors (three on `bvh_02`) although the library writes the same bytes; only NaN should fail. Separately,
+  `bvh_08` has two genuinely inverted boxes (x range crossed) that come out of the library as well, so the cause has to be found in the
+  node's triangle vertices, not in the rehydration.
 - The drawable decoder finds a drawable by name inside the inflated streams; for a resource whose name is not known, the dictionary
   entry (name + hash) still has to be located, and the graphics page run is searched in stored order, which worked here but needs a
   check on a drawable whose pages are not adjacent.
