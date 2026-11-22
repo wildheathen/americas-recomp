@@ -3,7 +3,7 @@
 // GPU addresses are the same; this tool maps memory at each buffer's GPU virtual address and copies the data there, so the same number
 // is a CPU pointer for the builder and a GPU address for its resources.
 // build: cl /nologo /EHsc /O2 /std:c++17 rehydrate_cpu.cpp d3d12.lib dxgi.lib /Fe:rehydrate_cpu.exe
-// usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6]
+// usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6] [index.bin] [indexFormat=42]
 //   src.bin starts with the 64-byte Xbox BVH header; vb.bin holds the geometry's vertices. XboxBvhBuilder.dll must be loadable.
 #include <windows.h>
 #include <d3d12.h>
@@ -73,11 +73,13 @@ static Aliased MakeAliased(ID3D12Device* dev, UINT64 bytes, bool zero) {
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    if (argc < 4) { printf("usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6]\n"); return 2; }
+    if (argc < 4) { printf("usage: rehydrate_cpu <src.bin> <vb.bin> <out.bin> [stride=12] [vertexCount=vb/stride] [vertexFormat=6] [index.bin] [indexFormat=42]\n"); return 2; }
     std::vector<char> src = Read(argv[1]), vb = Read(argv[2]);
+    std::vector<char> ib = argc > 7 ? Read(argv[7]) : std::vector<char>();
     UINT stride = argc > 4 ? (UINT)atoi(argv[4]) : 12;
     UINT vcount = argc > 5 ? (UINT)atoi(argv[5]) : (UINT)(vb.size() / (stride ? stride : 1));
     UINT vformat = argc > 6 ? (UINT)atoi(argv[6]) : 6;   // DXGI_FORMAT_R32G32B32_FLOAT
+    UINT iformat = argc > 8 ? (UINT)atoi(argv[8]) : 42;  // DXGI_FORMAT_R32_UINT
     if (src.size() < 64) { printf("source shorter than the 64-byte header\n"); return 2; }
     UINT64 total = ((UINT64)*(const UINT32*)(src.data() + 4) + 1) << 6;
 
@@ -91,12 +93,14 @@ int main(int argc, char** argv) {
     auto validate = (ValidateFn)GetProcAddress(m, VALIDATE);
     if (!rehydrate) { printf("rehydrate export not found\n"); return 2; }
 
-    const UINT64 VB_OFF = 0x8000, DATA_BYTES = VB_OFF + ((vb.size() + 0xFFF) & ~(UINT64)0xFFF);
+    const UINT64 VB_OFF = 0x8000, IB_OFF = VB_OFF + ((vb.size() + 0xFFF) & ~(UINT64)0xFFF);
+    const UINT64 DATA_BYTES = (ib.empty() ? VB_OFF + ((vb.size() + 0xFFF) & ~(UINT64)0xFFF) : IB_OFF + ((ib.size() + 0xFFF) & ~(UINT64)0xFFF));
     Aliased data = MakeAliased(dev.Get(), DATA_BYTES, false), dst = MakeAliased(dev.Get(), total, true), scratch = MakeAliased(dev.Get(), 1 << 20, true);
     if (!data.res || !dst.res || !scratch.res || !data.base || !dst.base || !scratch.base) { printf("buffer/alias setup failed\n"); return 2; }
     memset(data.base, 0, (size_t)((DATA_BYTES + 0xFFF) & ~0xFFFull));
     memcpy(data.cpu(), src.data(), src.size());
     memcpy(data.cpu() + VB_OFF, vb.data(), vb.size());
+    if (!ib.empty()) memcpy(data.cpu() + IB_OFF, ib.data(), ib.size());
 
     // upload the blob into the GPU buffer at the same address
     ComPtr<ID3D12Resource> up;
@@ -123,7 +127,11 @@ int main(int argc, char** argv) {
     g.Triangles.VertexCount = vcount;
     g.Triangles.VertexBuffer.StartAddress = data.res->GetGPUVirtualAddress() + VB_OFF;
     g.Triangles.VertexBuffer.StrideInBytes = stride;
-    g.Triangles.IndexFormat = DXGI_FORMAT_UNKNOWN;
+    g.Triangles.IndexFormat = ib.empty() ? DXGI_FORMAT_UNKNOWN : (DXGI_FORMAT)iformat;
+    if (!ib.empty()) {
+        g.Triangles.IndexBuffer = data.res->GetGPUVirtualAddress() + IB_OFF;
+        g.Triangles.IndexCount = (UINT)(ib.size() / ((iformat == 57) ? 2 : 4));
+    }
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd = {};
     bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
     bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
