@@ -14,7 +14,7 @@ What the package's DLLs need from the platform, and stand-ins for the Xbox-only 
   builder (`PLATFORM_SURFACE.md` explains the CPU-pointer aliasing the console's unified memory needs).
 * `xbox_device_proxy.h` now answers `QueryInterface` with the proxy itself when the real object returns its own pointer, so a caller
   that queries for a newer interface keeps going through the overrides. `bvh_test` records the Xbox command-list slot map learned so
-  far (Dispatch 14; Xbox-only 25-28; from 29, PC slot + 4) in its probe overrides.
+  far (Dispatch 14, pipeline state 25, Xbox-only 26-29, PC slot + 4 from 30) in its probe overrides.
 * `bvh_test.cpp` and `ffx_test.cpp` run the package's BVH builder and FidelityFX DLLs on a PC D3D12 device behind `xbox_device_proxy.h` (what works and where it stops: PLATFORM_SURFACE.md). `XS_HEAP=1` adds `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` to the builder's signatures (including the ones it creates from `RTS0` through device slot 16); `BVH_REPLACE_DIR` with the dumps from `BVH_DUMP_DIR` lowered by index creates all 53 pipelines. `BVH_BUILD=1` tries a real build call (reached, then a crash in a builder thread: see PLATFORM_SURFACE.md).
 * `bink_test.cpp` loads `Bink2Scarlett.dll` next to a stand-in `xmem.dll`, decodes every frame of a video and saves two frames as raw BGRA.
   `carve_bink.py <movies.rpf> <out_dir> [count]` extracts Bink videos from the archive (they are stored raw).

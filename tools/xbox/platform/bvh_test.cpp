@@ -92,8 +92,13 @@ static void __fastcall ClXbox33(XboxObjectProxy* self, ID3D12RootSignature* sig)
     if (Trace()) fprintf(stderr, "T cl xbox33 -> SetComputeRootSignature %p\n", (void*)sig);
     ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootSignature(sig);
 }
-// Four Xbox-only slots follow Dispatch (14), so every later slot is the PC slot + 4: 33 -> 29 (root signature), 35 -> 31 (root table),
-// 37 -> 33 (root 32-bit constant), 29 -> 25 (pipeline state), 30 -> 26 (barrier), 32 -> 28 (descriptor heaps), 45 -> 41 (root UAV).
+// Slot 25 is SetPipelineState (a single pointer in rdx, the rest of the registers are leftovers). The four Xbox-only slots are
+// 26-29; from 30 on the PC slot is the Xbox one minus four (30 -> 26 barrier, 32 -> 28 heaps, 33 -> 29 root signature,
+// 35 -> 31 root table, 37 -> 33 root constant, 39 -> 35 root 32-bit constants, 45 -> 41 root UAV).
+static void __fastcall ClXbox25(XboxObjectProxy* self, ID3D12PipelineState* pso) {
+    if (Trace()) fprintf(stderr, "T cl xbox25 -> SetPipelineState %p\n", (void*)pso);
+    ((ID3D12GraphicsCommandList*)self->real)->SetPipelineState(pso);
+}
 static void __fastcall ClXbox35(XboxObjectProxy* self, UINT root, D3D12_GPU_DESCRIPTOR_HANDLE h) {
     if (Trace()) fprintf(stderr, "T cl xbox35 -> SetComputeRootDescriptorTable %u %llx\n", root, (unsigned long long)h.ptr);
     ((ID3D12GraphicsCommandList*)self->real)->SetComputeRootDescriptorTable(root, h);
@@ -723,13 +728,13 @@ int main(int argc, char** argv) {
                         blp->Override(148, (void*)ClReserve);   // Xbox extension: command-stream reservation
                         blp->Override(35, (void*)ClXbox35);     // -> SetComputeRootDescriptorTable
                         blp->Override(37, (void*)ClXbox37);     // -> SetComputeRoot32BitConstant
-                        blp->Override(29, (void*)ClXbox29);     // -> SetPipelineState
                         blp->Override(30, (void*)ClXbox30);     // -> ResourceBarrier
                         blp->Override(32, (void*)ClXbox32);     // -> SetDescriptorHeaps
                         blp->Override(45, (void*)ClXbox45);     // -> SetComputeRootUnorderedAccessView
                         blp->Override(39, (void*)ClXbox39);     // -> SetComputeRoot32BitConstants
                         blp->Override(146, (void*)ClUnknown146); // Xbox extension, not identified yet (no-op probing)
-                        blp->Override(25, (void*)ClXboxOnly);   // Xbox-only slots 25-28
+                        blp->Override(25, (void*)ClXbox25);     // -> SetPipelineState
+                        blp->Override(29, (void*)ClXboxOnly);   // one of the four Xbox-only slots (26-29)
                         blp->Override(80, (void*)ClXboxOnly);   // probe: unknown shape, no-op
                         if (dstAlias) memset((char*)dstAlias + dstOff, 0, expected.size());
                         long brh = SehRehydrateBatched(batched, obj, (ID3D12GraphicsCommandList8*)blp, &bd);
